@@ -48,6 +48,14 @@ function isContentAssetsPage() {
   return window.location.href.includes('/content/assets');
 }
 
+function isTemplatesPage() {
+  // Avoid relying only on URL; templates are identifiable via contenttype on cards.
+  return (
+    window.location.href.includes('/templates') ||
+    document.querySelector('[data-omega-attribute-contenttype="templates"]') !== null
+  );
+}
+
 // ===== Content/assets CSS filtering (no flicker on scroll) =====
 
 const ASSETS_FILTER_STYLE_ID = 'gs4pm-assets-filter-style';
@@ -117,6 +125,95 @@ function updateAssetsCssFilter(activeCustomer, tags) {
   if (!styleEl) {
     styleEl = document.createElement('style');
     styleEl.id = ASSETS_FILTER_STYLE_ID;
+    document.head.appendChild(styleEl);
+  }
+  styleEl.textContent = css;
+}
+
+// ===== Templates CSS filtering (no flicker on scroll) =====
+
+const TEMPLATES_FILTER_STYLE_ID = 'gs4pm-templates-filter-style';
+
+function updateTemplatesCssFilter(activeCustomer, tags) {
+  if (!isTemplatesPage()) return;
+
+  let styleEl = document.getElementById(TEMPLATES_FILTER_STYLE_ID);
+
+  if (!activeCustomer || activeCustomer === 'ALL') {
+    if (styleEl) styleEl.remove();
+    return;
+  }
+
+  const itemIds = new Set();
+  const contentIds = new Set();
+
+  (tags || []).forEach(tag => {
+    if (!tag || tag.customer !== activeCustomer) return;
+
+    const itemId = extractAttrFromSelector(tag.selector, 'data-item-id');
+    const contentId = extractAttrFromSelector(tag.selector, 'data-omega-attribute-contentid');
+    if (itemId) itemIds.add(itemId);
+    if (contentId) contentIds.add(contentId);
+
+    if (!itemId && !contentId) {
+      try {
+        const el = document.querySelector(tag.selector);
+        if (el instanceof Element) {
+          const container = getDisplayContainer(el) || el;
+          const harvestedItemId = container.getAttribute('data-item-id');
+          const harvestedContentId = container.getAttribute('data-omega-attribute-contentid');
+          if (harvestedItemId) itemIds.add(harvestedItemId);
+          if (harvestedContentId) contentIds.add(harvestedContentId);
+        }
+      } catch (e) {
+        // ignore invalid selectors
+      }
+    }
+  });
+
+  const showItemSelectors = [];
+  const showContentSelectors = [];
+  itemIds.forEach(id => showItemSelectors.push(`[data-item-id="${cssEscapeAttrValue(id)}"]`));
+  contentIds.forEach(id => showContentSelectors.push(`[data-omega-attribute-contentid="${cssEscapeAttrValue(id)}"]`));
+
+  // Templates use a virtualized wrapper `div[role="presentation"].item` with absolute positioning.
+  // Use :has() so we hide/show the wrapper itself (prevents scroll reusing DOM nodes from flashing).
+  const hideWrapper =
+    `div[role="presentation"].item:has([data-omega-attribute-contenttype="templates"][data-item-id]),` +
+    `div[role="presentation"].item:has([data-omega-attribute-contenttype="templates"][data-omega-attribute-contentid])` +
+    `{display:none !important;}`;
+
+  const showWrapper = (() => {
+    const parts = [];
+    showItemSelectors.forEach(sel => {
+      parts.push(`div[role="presentation"].item:has([data-omega-attribute-contenttype="templates"]${sel})`);
+    });
+    showContentSelectors.forEach(sel => {
+      parts.push(`div[role="presentation"].item:has([data-omega-attribute-contenttype="templates"]${sel})`);
+    });
+    return parts.length ? `${parts.join(',')}{display:revert !important;}` : '';
+  })();
+
+  // Fallback: if wrapper class changes, still hide the card itself.
+  const hideTiles = `[data-omega-attribute-contenttype="templates"][data-item-id],[data-omega-attribute-contenttype="templates"][data-omega-attribute-contentid]{display:none !important;}`;
+  const showTiles = (() => {
+    const parts = [];
+    itemIds.forEach(id =>
+      parts.push(`[data-omega-attribute-contenttype="templates"][data-item-id="${cssEscapeAttrValue(id)}"]`)
+    );
+    contentIds.forEach(id =>
+      parts.push(
+        `[data-omega-attribute-contenttype="templates"][data-omega-attribute-contentid="${cssEscapeAttrValue(id)}"]`
+      )
+    );
+    return parts.length ? `${parts.join(',')}{display:revert !important;}` : '';
+  })();
+
+  const css = hideWrapper + showWrapper + hideTiles + showTiles;
+
+  if (!styleEl) {
+    styleEl = document.createElement('style');
+    styleEl.id = TEMPLATES_FILTER_STYLE_ID;
     document.head.appendChild(styleEl);
   }
   styleEl.textContent = css;
@@ -1358,6 +1455,14 @@ function applyFilter(activeCustomer) {
       return;
     }
 
+    // Clean filtering for Templates: CSS-driven to avoid scroll flicker on virtualization.
+    if (isTemplatesPage()) {
+      updateTemplatesCssFilter(activeCustomer, tags);
+      cachedTags = tags;
+      if (tagging) refreshBadges();
+      return;
+    }
+
     // Find all potential container types
     const allContainers = new Set();
     
@@ -1576,6 +1681,7 @@ function applyFilterToNode(node) {
   if (currentFilterCustomer === 'ALL') return;
   if (!cachedTags.length) return;
   if (isContentAssetsPage()) return;
+  if (isTemplatesPage()) return;
 
   // NEW LOGIC: Hide only items tagged to OTHER customers
   // Show items tagged to current customer + all untagged items
