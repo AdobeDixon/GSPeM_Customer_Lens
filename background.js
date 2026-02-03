@@ -6,6 +6,7 @@ const MENU_SEPARATOR_ID = 'gs4pm_tag_separator';
 const MENU_ADD_CUSTOMER_ID = 'gs4pm_tag_add_customer';
 const GS4PM_HOST = 'experience.adobe.com';
 const GS4PM_TOKEN = 'genstudio';
+const TAGGING_ENABLED_KEY = 'gs4pm_tagging_enabled';
 
 function isGs4pmUrl(url) {
   if (!url) return false;
@@ -153,4 +154,14 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
   const { tabId, message } = req;
   broadcastToAllFrames(tabId, message, (result) => sendResponse(result));
   return true; // keep message channel open for async sendResponse
+});
+
+// Content script -> stop tagging everywhere (Esc pressed in any frame).
+chrome.runtime.onMessage.addListener((req, sender) => {
+  if (!req || req.type !== 'ESC_STOP_TAGGING') return;
+  const tabId = sender?.tab?.id;
+  if (!tabId) return;
+  chrome.storage.local.set({ [TAGGING_ENABLED_KEY]: false }, () => {
+    broadcastToAllFrames(tabId, { type: 'STOP_TAGGING' });
+  });
 });

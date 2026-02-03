@@ -19,6 +19,9 @@ let tagging = false;
 let currentTagCustomer = null;
 let hoverHandler = null;
 let clickHandler = null;
+let escapeHandler = null;
+let bannerResizeHandler = null;
+let lastOutlinedContainer = null;
 let lastRightClickedSelector = null;
 let currentFilterCustomer = 'ALL';
 let cachedTags = [];
@@ -32,6 +35,8 @@ let isTemporarilyIncreasingHeight = false; // Flag to prevent observer from rese
 
 const CURRENT_CUSTOMER_KEY = 'gs4pm_current_customer';
 const ACTIVE_FILTER_KEY = 'gs4pm_active_filter_customer';
+const TAGGING_ENABLED_KEY = 'gs4pm_tagging_enabled';
+const TAGGING_BANNER_ID = 'gs4pm-tagging-banner';
 
 console.log('[GS4PM Filter] contentScript loaded in frame:', window.location.href);
 console.log('[GS4PM Filter] Initializing on GS4PM page:', window.location.href);
@@ -303,9 +308,21 @@ function findTaggableElement(eventOrNode) {
     'div[data-omega-element="explore-card"]',
     '[role="option"]',
     'div[data-test-id^="library-drop-target"]',
+    '[data-item-id]',
+    '[data-omega-attribute-contentid]',
   ].join(', ');
 
-  for (const node of path) {
+  const candidates = Array.from(path);
+
+  // If this came from a mouse event, also try the actual point hit.
+  if (typeof eventOrNode.clientX === 'number' && typeof eventOrNode.clientY === 'number') {
+    const pointEls = document.elementsFromPoint
+      ? document.elementsFromPoint(eventOrNode.clientX, eventOrNode.clientY)
+      : [];
+    for (const el of pointEls) candidates.push(el);
+  }
+
+  for (const node of candidates) {
     if (!(node instanceof Element)) continue;
 
     if (node.matches && node.matches(taggableSelector)) {
@@ -465,14 +482,50 @@ function addBadge(container, customer) {
 
 function refreshBadges() {
   if (!tagging) return;
-  removeAllBadges(false);
-  if (!cachedTags.length) return;
+  if (!cachedTags.length) {
+    removeAllBadges(false);
+    return;
+  }
+
+  // Build a map of container -> customers, then update in-place.
+  // This avoids the visual flicker of removing/re-adding badges during scroll virtualization.
+  const byContainer = new Map();
 
   cachedTags.forEach(tag => {
-    Array.from(document.querySelectorAll(tag.selector)).forEach(el => {
-      const container = getDisplayContainer(el) || el;
-      addBadge(container, tag.customer);
-    });
+    if (!tag?.selector || !tag.customer) return;
+    try {
+      Array.from(document.querySelectorAll(tag.selector)).forEach(el => {
+        const container = getDisplayContainer(el) || el;
+        if (!container) return;
+        let set = byContainer.get(container);
+        if (!set) {
+          set = new Set();
+          byContainer.set(container, set);
+        }
+        set.add(tag.customer);
+      });
+    } catch (e) {
+      // ignore invalid selectors
+    }
+  });
+
+  // Remove badges for containers that are no longer present in the computed map.
+  Array.from(document.querySelectorAll('.gs4pm-tag-badge')).forEach(badge => {
+    const parent = badge.parentElement;
+    if (!parent || byContainer.has(parent)) return;
+    badge.remove();
+    if (parent.dataset && parent.dataset.gs4pmOriginalPosition === 'static') {
+      parent.style.position = '';
+      delete parent.dataset.gs4pmOriginalPosition;
+    }
+  });
+
+  // Update/create badges for all current containers.
+  byContainer.forEach((customerSet, container) => {
+    const badge = ensureBadgeContainer(container);
+    const names = Array.from(customerSet);
+    badge.dataset.customers = names.join('|');
+    badge.textContent = names.join(', ');
   });
 }
 
@@ -2459,12 +2512,36 @@ function startTagging(customer) {
   tagging = true;
   currentTagCustomer = customer;
 
+  showTaggingBanner();
+
+  escapeHandler = (e) => {
+    if (!tagging) return;
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    // Stop tagging in all frames (GenStudio runs inside iframes).
+    // Background can infer tabId from sender.tab and broadcast to all frames.
+    if (chrome.runtime && chrome.runtime.id) {
+      chrome.runtime.sendMessage({ type: 'ESC_STOP_TAGGING' }, () => {
+        // Even if background isn't available, stop locally.
+        stopTagging();
+        chrome.storage.local.set({ [TAGGING_ENABLED_KEY]: false });
+      });
+    } else {
+      stopTagging();
+    }
+  };
+
   hoverHandler = e => {
     if (!tagging) return;
     const el = findTaggableElement(e);
     if (el) {
       const container = getDisplayContainer(el) || el;
+      if (lastOutlinedContainer && lastOutlinedContainer !== container) {
+        lastOutlinedContainer.style.outline = '';
+      }
       container.style.outline = '2px dashed #00bcd4';
+      lastOutlinedContainer = container;
     }
   };
 
@@ -2488,6 +2565,7 @@ function startTagging(customer) {
 
     const container = getDisplayContainer(taggableEl) || taggableEl;
     container.style.outline = '';
+    if (lastOutlinedContainer === container) lastOutlinedContainer = null;
 
     const selector = getUniqueSelector(taggableEl);
     console.log('[GS4PM Filter] Click-to-tag selector', selector);
@@ -2497,6 +2575,15 @@ function startTagging(customer) {
   document.addEventListener('mouseover', hoverHandler, true);
   document.addEventListener('mouseout', mouseoutHandler, true);
   document.addEventListener('click', clickHandler, true);
+  document.addEventListener('keydown', escapeHandler, true);
+  // Banner is rendered only in top frame, so only top frame needs resize handling.
+  if (window.top === window) {
+    if (bannerResizeHandler) {
+      window.removeEventListener('resize', bannerResizeHandler, false);
+    }
+    bannerResizeHandler = () => positionTaggingBanner();
+    window.addEventListener('resize', bannerResizeHandler, false);
+  }
 
   console.log('[GS4PM Filter] Tagging mode ON for customer:', customer, 'in frame', window.location.href);
 
@@ -2511,16 +2598,103 @@ function stopTagging() {
 
   document.removeEventListener('mouseover', hoverHandler, true);
   document.removeEventListener('click', clickHandler, true);
+  if (escapeHandler) {
+    document.removeEventListener('keydown', escapeHandler, true);
+  }
   if (startTagging.mouseoutHandler) {
     document.removeEventListener('mouseout', startTagging.mouseoutHandler, true);
+  }
+  if (bannerResizeHandler) {
+    window.removeEventListener('resize', bannerResizeHandler, false);
   }
 
   hoverHandler = null;
   clickHandler = null;
+  escapeHandler = null;
+  bannerResizeHandler = null;
+
+  if (lastOutlinedContainer) {
+    lastOutlinedContainer.style.outline = '';
+    lastOutlinedContainer = null;
+  }
 
   removeAllBadges(true);
+  removeTaggingBanner();
 
   console.log('[GS4PM Filter] Tagging mode OFF in frame', window.location.href);
+}
+
+function showTaggingBanner() {
+  // Avoid duplicate banners when content script runs in multiple iframes.
+  if (window.top !== window) return;
+  if (document.getElementById(TAGGING_BANNER_ID)) return;
+  const banner = document.createElement('div');
+  banner.id = TAGGING_BANNER_ID;
+  banner.textContent = 'Press Esc to exit tagging mode';
+  banner.style.position = 'fixed';
+  banner.style.left = '0px'; // positioned by positionTaggingBanner()
+  banner.style.bottom = '28px';
+  banner.style.transform = 'translateX(-50%)';
+  banner.style.padding = '10px 14px';
+  banner.style.borderRadius = '999px';
+  banner.style.background = 'rgba(0, 0, 0, 0.55)';
+  banner.style.border = '1px solid rgba(255, 255, 255, 0.22)';
+  banner.style.color = '#ffffff';
+  banner.style.fontSize = '14px';
+  banner.style.fontWeight = '650';
+  banner.style.fontFamily = 'system-ui, -apple-system, "Segoe UI", sans-serif';
+  banner.style.letterSpacing = '0.02em';
+  banner.style.boxShadow = '0 6px 16px rgba(0, 0, 0, 0.25)';
+  banner.style.backdropFilter = 'blur(6px)';
+  banner.style.textShadow = '0 1px 2px rgba(0, 0, 0, 0.35)';
+  banner.style.pointerEvents = 'none';
+  banner.style.zIndex = '2147483647';
+  (document.body || document.documentElement).appendChild(banner);
+  positionTaggingBanner();
+}
+
+function removeTaggingBanner() {
+  const banner = document.getElementById(TAGGING_BANNER_ID);
+  if (banner) banner.remove();
+}
+
+function detectLeftNavWidth() {
+  const vh = window.innerHeight || 0;
+  const maxReasonable = Math.min(360, Math.floor((window.innerWidth || 0) * 0.6));
+
+  const nodes = new Set();
+  document.querySelectorAll(
+    'nav, aside, [role="navigation"], [aria-label*="nav" i], [class*="nav"], [class*="Nav"], [class*="sidebar"], [class*="Sidebar"], [class*="rail"], [class*="Rail"]'
+  ).forEach(n => nodes.add(n));
+  // Many SPAs mount fixed rails as body children.
+  (document.body?.children ? Array.from(document.body.children) : []).forEach(n => nodes.add(n));
+
+  let best = 0;
+  nodes.forEach((el) => {
+    if (!(el instanceof Element)) return;
+    const cs = window.getComputedStyle(el);
+    if (cs.position !== 'fixed' && cs.position !== 'sticky') return;
+    const rect = el.getBoundingClientRect();
+    if (rect.left > 1) return;
+    if (rect.top > 1) return;
+    if (rect.height < vh * 0.7) return;
+    if (rect.width < 48) return;
+    if (rect.width > maxReasonable) return;
+    best = Math.max(best, rect.width);
+  });
+
+  return Math.round(best);
+}
+
+function positionTaggingBanner() {
+  const banner = document.getElementById(TAGGING_BANNER_ID);
+  if (!banner) return;
+
+  const navW = detectLeftNavWidth();
+  const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+  const contentW = Math.max(0, vw - navW);
+  const centerX = navW + contentW / 2;
+  banner.style.left = `${Math.round(centerX)}px`;
 }
 
 // ===== Right-click tracking =====
@@ -2609,6 +2783,19 @@ if (chrome.runtime && chrome.runtime.id) {
 // ===== Mutation observer: keep new nodes filtered & badged =====
 
 let dropdownCheckTimeout = null;
+let badgeRefreshScheduled = false;
+
+function scheduleBadgeRefresh() {
+  if (!tagging) return;
+  if (!cachedTags.length) return;
+  if (!isContentAssetsPage() && !isTemplatesPage()) return;
+  if (badgeRefreshScheduled) return;
+  badgeRefreshScheduled = true;
+  requestAnimationFrame(() => {
+    badgeRefreshScheduled = false;
+    refreshBadges();
+  });
+}
 
 const observer = new MutationObserver((mutations) => {
   if (!cachedTags.length) return;
@@ -2616,6 +2803,11 @@ const observer = new MutationObserver((mutations) => {
   let hasDropdownMutation = false;
   
   mutations.forEach(m => {
+    if (m.type === 'attributes') {
+      // Content/assets + templates reuse DOM nodes; re-apply badges when ids change.
+      scheduleBadgeRefresh();
+      return;
+    }
     m.addedNodes.forEach(node => {
       // Check if this is a dropdown-related node FIRST
       if (node instanceof Element) {
@@ -2644,8 +2836,6 @@ const observer = new MutationObserver((mutations) => {
             if (!filteringListboxes.has(listbox)) {
               applyFilterToNode(listbox);
             }
-          } else {
-            console.log('[GS4PM Filter] MutationObserver could not find listbox for dropdown node');
           }
           
           // Don't also filter this node as a regular node
@@ -2661,8 +2851,19 @@ const observer = new MutationObserver((mutations) => {
 
 observer.observe(document.documentElement || document.body, {
   childList: true,
-  subtree: true
+  subtree: true,
+  attributes: true,
+  attributeFilter: ['data-item-id', 'data-omega-attribute-contentid']
 });
+
+// Keep tag badges visible during scroll virtualization.
+window.addEventListener(
+  'scroll',
+  () => {
+    scheduleBadgeRefresh();
+  },
+  true
+);
 
 // Watch for SPA-style route changes (pathname changes without full reload)
 function handleRouteChange() {
