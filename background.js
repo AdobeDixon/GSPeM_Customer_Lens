@@ -7,6 +7,7 @@ const MENU_ADD_CUSTOMER_ID = 'gs4pm_tag_add_customer';
 const GS4PM_HOST = 'experience.adobe.com';
 const GS4PM_TOKEN = 'genstudio';
 const TAGGING_ENABLED_KEY = 'gs4pm_tagging_enabled';
+const OVERLAY_VISIBLE_KEY = 'gs4pm_overlay_visible';
 
 function isGs4pmUrl(url) {
   if (!url) return false;
@@ -152,7 +153,12 @@ chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
   if (!req || req.type !== 'GS4PM_BROADCAST') return;
 
   const { tabId, message } = req;
-  broadcastToAllFrames(tabId, message, (result) => sendResponse(result));
+  const effectiveTabId = tabId ?? sender?.tab?.id;
+  if (!effectiveTabId) {
+    sendResponse?.({ ok: false, error: 'Missing tabId' });
+    return;
+  }
+  broadcastToAllFrames(effectiveTabId, message, (result) => sendResponse(result));
   return true; // keep message channel open for async sendResponse
 });
 
@@ -163,5 +169,21 @@ chrome.runtime.onMessage.addListener((req, sender) => {
   if (!tabId) return;
   chrome.storage.local.set({ [TAGGING_ENABLED_KEY]: false }, () => {
     broadcastToAllFrames(tabId, { type: 'STOP_TAGGING' });
+  });
+});
+
+// Keyboard shortcut: toggle bottom workspace bar.
+chrome.commands?.onCommand?.addListener((command) => {
+  if (command !== 'toggle-overlay-bar') return;
+
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tab = tabs && tabs.length ? tabs[0] : null;
+    if (!tab) return;
+    if (!isGs4pmUrl(tab.url || '')) return;
+
+    chrome.storage.local.get([OVERLAY_VISIBLE_KEY], (data) => {
+      const next = !data[OVERLAY_VISIBLE_KEY];
+      chrome.storage.local.set({ [OVERLAY_VISIBLE_KEY]: next });
+    });
   });
 });

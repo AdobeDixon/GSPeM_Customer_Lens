@@ -41,8 +41,10 @@ const disabledSection = document.getElementById('disabled-section');
 const manageSection = document.getElementById('manage-section');
 const githubLink = document.getElementById('github-link');
 const versionText = document.getElementById('version-text');
+const toggleOverlayBarBtn = document.getElementById('toggle-overlay-bar');
 
 let taggingEnabled = false;
+const OVERLAY_VISIBLE_KEY = 'gs4pm_overlay_visible';
 
 function wireFooter() {
   try {
@@ -65,12 +67,18 @@ function wireFooter() {
   }
 }
 
+function updateOverlayButtonUi(visible) {
+  if (!toggleOverlayBarBtn) return;
+  toggleOverlayBarBtn.textContent = visible ? 'Hide bottom bar' : 'Show bottom bar';
+}
+
 function setUiDisabled(disabled) {
   if (disabledSection) disabledSection.hidden = !disabled;
   [filterSelect, tagSelect, toggleTaggingBtn, newCustomerInput, addCustomerBtn].forEach((el) => {
     if (!el) return;
     el.disabled = !!disabled;
   });
+  if (toggleOverlayBarBtn) toggleOverlayBarBtn.disabled = !!disabled;
 }
 
 function focusAddCustomerInput() {
@@ -309,6 +317,21 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   const isAllowed = isGs4pmUrl(activeTab?.url || '');
   setUiDisabled(!isAllowed);
   wireFooter();
+
+  if (toggleOverlayBarBtn) {
+    chrome.storage.local.get([OVERLAY_VISIBLE_KEY], (data) => {
+      updateOverlayButtonUi(!!data[OVERLAY_VISIBLE_KEY]);
+    });
+    toggleOverlayBarBtn.addEventListener('click', () => {
+      chrome.storage.local.get([OVERLAY_VISIBLE_KEY], (data) => {
+        const next = !data[OVERLAY_VISIBLE_KEY];
+        chrome.storage.local.set({ [OVERLAY_VISIBLE_KEY]: next }, () => {
+          updateOverlayButtonUi(next);
+        });
+      });
+    });
+  }
+
   if (!isAllowed) return;
   loadStateAndCustomers();
   checkOpenAddCustomerFlag();

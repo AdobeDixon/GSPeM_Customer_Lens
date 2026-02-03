@@ -38,6 +38,9 @@ const CURRENT_CUSTOMER_KEY = 'gs4pm_current_customer';
 const ACTIVE_FILTER_KEY = 'gs4pm_active_filter_customer';
 const TAGGING_ENABLED_KEY = 'gs4pm_tagging_enabled';
 const TAGGING_BANNER_ID = 'gs4pm-tagging-banner';
+const OVERLAY_VISIBLE_KEY = 'gs4pm_overlay_visible';
+const OVERLAY_ID = 'gs4pm-workspace-bar';
+const OVERLAY_STYLE_ID = 'gs4pm-workspace-bar-style';
 
 console.log('[GS4PM Filter] contentScript loaded in frame:', window.location.href);
 console.log('[GS4PM Filter] Initializing on GS4PM page:', window.location.href);
@@ -153,6 +156,484 @@ document.addEventListener(
   },
   true
 );
+
+// ===== Bottom workspace bar (persistent overlay) =====
+
+function isTopFrame() {
+  try {
+    return window.top === window;
+  } catch {
+    return false;
+  }
+}
+
+function injectOverlayStyles() {
+  if (!isTopFrame()) return;
+  if (document.getElementById(OVERLAY_STYLE_ID)) return;
+
+  const style = document.createElement('style');
+  style.id = OVERLAY_STYLE_ID;
+  style.textContent = `
+    :root{
+      --gs4pm-overlay-bg: rgba(38, 38, 38, 0.84);
+      --gs4pm-overlay-border: rgba(255, 255, 255, 0.12);
+      --gs4pm-overlay-text: rgba(255, 255, 255, 0.92);
+      --gs4pm-overlay-muted: rgba(255, 255, 255, 0.64);
+      --gs4pm-overlay-accent: #2ee071;
+      --gs4pm-overlay-accent-soft: rgba(46, 224, 113, 0.22);
+    }
+
+    #${OVERLAY_ID}{
+      position: fixed;
+      left: 50%;
+      bottom: 14px;
+      transform: translateX(-50%);
+      z-index: 2147483647;
+      width: min(980px, calc(100vw - 24px));
+      border-radius: 16px;
+      border: 1px solid var(--gs4pm-overlay-border);
+      background: var(--gs4pm-overlay-bg);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      box-shadow: 0 18px 42px rgba(0,0,0,0.50);
+      color: var(--gs4pm-overlay-text);
+      font: 650 12px system-ui, -apple-system, Segoe UI, sans-serif;
+      letter-spacing: 0.01em;
+    }
+    #${OVERLAY_ID} *{ box-sizing: border-box; }
+    #${OVERLAY_ID}[data-hidden="true"]{ display:none; }
+
+    #${OVERLAY_ID} .gs4pm-row{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      padding:10px 12px;
+    }
+    #${OVERLAY_ID} .gs4pm-left{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      min-width:0;
+      flex:1;
+    }
+    #${OVERLAY_ID} .gs4pm-right{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      flex:0 0 auto;
+    }
+    #${OVERLAY_ID} .gs4pm-icon{
+      width:22px;
+      height:22px;
+      border-radius:7px;
+      border:1px solid rgba(255,255,255,0.10);
+      box-shadow: 0 10px 18px rgba(0,0,0,0.28);
+      flex:0 0 auto;
+    }
+    #${OVERLAY_ID} .gs4pm-pill{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:8px 10px;
+      border-radius:14px;
+      border:1px solid rgba(255,255,255,0.10);
+      background: rgba(0,0,0,0.18);
+      min-width:0;
+    }
+    #${OVERLAY_ID} .gs4pm-label{
+      color: var(--gs4pm-overlay-muted);
+      font-weight:800;
+      white-space:nowrap;
+    }
+    #${OVERLAY_ID} .gs4pm-btn{
+      border:1px solid rgba(255,255,255,0.12);
+      background: rgba(0,0,0,0.20);
+      color: var(--gs4pm-overlay-text);
+      border-radius:999px;
+      padding:8px 10px;
+      font-weight:800;
+      cursor:pointer;
+      transition: background 120ms ease, border-color 120ms ease, transform 60ms ease;
+      white-space:nowrap;
+    }
+    #${OVERLAY_ID} .gs4pm-btn:hover{ background: rgba(255,255,255,0.08); }
+    #${OVERLAY_ID} .gs4pm-btn:active{ transform: translateY(1px); }
+
+    #${OVERLAY_ID} .gs4pm-btn-primary{
+      background: linear-gradient(135deg, var(--gs4pm-overlay-accent), #68ffb0);
+      border-color: rgba(255,255,255,0.10);
+      color: rgba(0,0,0,0.88);
+      box-shadow: 0 10px 22px rgba(46,224,113,0.22);
+    }
+    #${OVERLAY_ID} .gs4pm-btn-primary:hover{
+      background: linear-gradient(135deg, #39ea84, #7dffbe);
+    }
+    #${OVERLAY_ID} .gs4pm-btn-primary[data-off="true"]{
+      background: rgba(0,0,0,0.20);
+      color: var(--gs4pm-overlay-text);
+      box-shadow:none;
+      border-color: rgba(255,255,255,0.12);
+    }
+
+    /* Custom dropdown */
+    #${OVERLAY_ID} .dd{ position:relative; min-width:200px; max-width:320px; }
+    #${OVERLAY_ID} .dd button{
+      width:100%;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      border:1px solid rgba(255,255,255,0.12);
+      background: rgba(0,0,0,0.22);
+      color: var(--gs4pm-overlay-text);
+      border-radius:12px;
+      padding:8px 10px;
+      cursor:pointer;
+      font-weight:700;
+    }
+    #${OVERLAY_ID} .dd button:focus{
+      outline:none;
+      box-shadow: 0 0 0 3px var(--gs4pm-overlay-accent-soft);
+      border-color: var(--gs4pm-overlay-accent);
+    }
+    #${OVERLAY_ID} .dd .value{
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+      min-width:0;
+      text-align:left;
+      flex:1;
+    }
+    #${OVERLAY_ID} .dd .chev{ opacity:0.75; flex:0 0 auto; }
+    #${OVERLAY_ID} .dd .menu{
+      position:absolute;
+      left:0;
+      right:0;
+      bottom: calc(100% + 8px);
+      border-radius:14px;
+      border:1px solid rgba(255,255,255,0.14);
+      background: rgba(18,18,18,0.96);
+      box-shadow: 0 18px 48px rgba(0,0,0,0.55);
+      padding:6px;
+      max-height:320px;
+      overflow:auto;
+      display:none;
+    }
+    #${OVERLAY_ID} .dd[data-open="true"] .menu{ display:block; }
+    #${OVERLAY_ID} .dd .opt{
+      padding:8px 10px;
+      border-radius:10px;
+      cursor:pointer;
+      color: rgba(255,255,255,0.88);
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+    }
+    #${OVERLAY_ID} .dd .opt:hover{ background: rgba(255,255,255,0.08); }
+    #${OVERLAY_ID} .dd .opt[data-selected="true"]{
+      background: rgba(46,224,113,0.16);
+      border: 1px solid rgba(46,224,113,0.22);
+    }
+  `;
+  (document.head || document.documentElement).appendChild(style);
+}
+
+function closeAllDropdowns(root) {
+  root.querySelectorAll('.dd[data-open="true"]').forEach((dd) => dd.setAttribute('data-open', 'false'));
+}
+
+function createDropdown({ label, placeholder, options, value, onChange }) {
+  const wrap = document.createElement('div');
+  wrap.className = 'dd';
+  wrap.setAttribute('data-open', 'false');
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.setAttribute('aria-label', label);
+
+  const valEl = document.createElement('div');
+  valEl.className = 'value';
+  valEl.textContent = value ? String(value) : placeholder;
+
+  const chev = document.createElement('div');
+  chev.className = 'chev';
+  chev.textContent = '▴';
+
+  btn.appendChild(valEl);
+  btn.appendChild(chev);
+
+  const menu = document.createElement('div');
+  menu.className = 'menu';
+
+  const render = () => {
+    menu.innerHTML = '';
+    (options || []).forEach((opt) => {
+      const item = document.createElement('div');
+      item.className = 'opt';
+      item.setAttribute('data-selected', opt.value === value ? 'true' : 'false');
+      item.textContent = opt.label;
+      item.addEventListener('click', () => {
+        value = opt.value;
+        valEl.textContent = opt.label;
+        wrap.setAttribute('data-open', 'false');
+        render();
+        onChange?.(opt.value);
+        // If tagging banner is present, keep it out of the way.
+        try { positionTaggingBanner(); } catch {}
+      });
+      menu.appendChild(item);
+    });
+  };
+  render();
+
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    const open = wrap.getAttribute('data-open') === 'true';
+    const root = wrap.closest(`#${OVERLAY_ID}`) || document;
+    closeAllDropdowns(root);
+    wrap.setAttribute('data-open', open ? 'false' : 'true');
+    // If tagging banner is present, keep it out of the way.
+    try { positionTaggingBanner(); } catch {}
+  });
+
+  wrap.appendChild(btn);
+  wrap.appendChild(menu);
+
+  return {
+    el: wrap,
+    setOptions(nextOptions) {
+      options = nextOptions || [];
+      render();
+    },
+    setValue(nextValue, nextLabel) {
+      value = nextValue;
+      valEl.textContent = nextLabel ?? (value ? String(value) : placeholder);
+      render();
+    },
+    getValue() {
+      return value;
+    }
+  };
+}
+
+function sendBroadcastFromContent(message) {
+  if (!chrome.runtime || !chrome.runtime.id) return;
+  chrome.runtime.sendMessage({ type: 'GS4PM_BROADCAST', message }, () => {});
+}
+
+function ensureWorkspaceBar() {
+  if (!isTopFrame()) return;
+  injectOverlayStyles();
+  if (document.getElementById(OVERLAY_ID)) return;
+
+  const bar = document.createElement('div');
+  bar.id = OVERLAY_ID;
+  bar.setAttribute('data-hidden', 'true');
+
+  const row = document.createElement('div');
+  row.className = 'gs4pm-row';
+
+  const left = document.createElement('div');
+  left.className = 'gs4pm-left';
+
+  const icon = document.createElement('img');
+  icon.className = 'gs4pm-icon';
+  try {
+    icon.src = chrome.runtime.getURL('icons/logo.png');
+  } catch {
+    // ignore
+  }
+  icon.alt = '';
+  icon.decoding = 'async';
+
+  const filterPill = document.createElement('div');
+  filterPill.className = 'gs4pm-pill';
+  const filterLabel = document.createElement('div');
+  filterLabel.className = 'gs4pm-label';
+  filterLabel.textContent = 'Filter';
+
+  const filterDd = createDropdown({
+    label: 'Filter customer',
+    placeholder: 'All customers',
+    options: [{ value: 'ALL', label: 'All customers' }],
+    value: 'ALL',
+    onChange: (val) => {
+      const normalized = !val || val === 'ALL' ? 'ALL' : val;
+      chrome.storage.local.set({ [ACTIVE_FILTER_KEY]: normalized });
+    }
+  });
+
+  filterPill.appendChild(filterLabel);
+  filterPill.appendChild(filterDd.el);
+
+  const tagPill = document.createElement('div');
+  tagPill.className = 'gs4pm-pill';
+  const tagLabel = document.createElement('div');
+  tagLabel.className = 'gs4pm-label';
+  tagLabel.textContent = 'Tag';
+
+  const tagDd = createDropdown({
+    label: 'Tag customer',
+    placeholder: 'Select customer…',
+    options: [{ value: '__NONE__', label: 'Select customer…' }],
+    value: '__NONE__',
+    onChange: (val) => {
+      if (!val || val === '__NONE__') {
+        chrome.storage.local.set({ [CURRENT_CUSTOMER_KEY]: '__ALL__' });
+        return;
+      }
+      chrome.storage.local.set({ [CURRENT_CUSTOMER_KEY]: val });
+      chrome.storage.local.get([TAGGING_ENABLED_KEY], (data) => {
+        if (!data[TAGGING_ENABLED_KEY]) return;
+        sendBroadcastFromContent({ type: 'STOP_TAGGING' });
+        sendBroadcastFromContent({ type: 'START_TAGGING', customer: val });
+      });
+    }
+  });
+
+  tagPill.appendChild(tagLabel);
+  tagPill.appendChild(tagDd.el);
+
+  const toggleTagBtn = document.createElement('button');
+  toggleTagBtn.type = 'button';
+  toggleTagBtn.className = 'gs4pm-btn gs4pm-btn-primary';
+  toggleTagBtn.setAttribute('data-off', 'true');
+  toggleTagBtn.textContent = 'Enable tagging';
+
+  const updateToggleBtn = (enabled) => {
+    toggleTagBtn.setAttribute('data-off', enabled ? 'false' : 'true');
+    toggleTagBtn.textContent = enabled ? 'Disable tagging' : 'Enable tagging';
+  };
+
+  toggleTagBtn.addEventListener('click', () => {
+    chrome.storage.local.get([TAGGING_ENABLED_KEY], (data) => {
+      const enabled = !!data[TAGGING_ENABLED_KEY];
+      if (enabled) {
+        chrome.storage.local.set({ [TAGGING_ENABLED_KEY]: false }, () => {
+          updateToggleBtn(false);
+          sendBroadcastFromContent({ type: 'STOP_TAGGING' });
+        });
+        return;
+      }
+
+      const selected = tagDd.getValue();
+      if (!selected || selected === '__NONE__' || selected === 'ALL') return;
+
+      chrome.storage.local.set(
+        { [TAGGING_ENABLED_KEY]: true, [CURRENT_CUSTOMER_KEY]: selected },
+        () => {
+          updateToggleBtn(true);
+          sendBroadcastFromContent({ type: 'START_TAGGING', customer: selected });
+        }
+      );
+    });
+  });
+
+  const hideBtn = document.createElement('button');
+  hideBtn.type = 'button';
+  hideBtn.className = 'gs4pm-btn';
+  hideBtn.textContent = 'Hide';
+  hideBtn.addEventListener('click', () => chrome.storage.local.set({ [OVERLAY_VISIBLE_KEY]: false }));
+
+  const right = document.createElement('div');
+  right.className = 'gs4pm-right';
+  right.appendChild(toggleTagBtn);
+  right.appendChild(hideBtn);
+
+  left.appendChild(icon);
+  left.appendChild(filterPill);
+  left.appendChild(tagPill);
+
+  row.appendChild(left);
+  row.appendChild(right);
+  bar.appendChild(row);
+
+  document.addEventListener(
+    'pointerdown',
+    (e) => {
+      if (!bar.isConnected) return;
+      const t = e.target instanceof Node ? e.target : null;
+      if (t && bar.contains(t)) return;
+      closeAllDropdowns(bar);
+    },
+    true
+  );
+  document.addEventListener(
+    'keydown',
+    (e) => {
+      if (e.key !== 'Escape') return;
+      closeAllDropdowns(bar);
+    },
+    true
+  );
+
+  (document.body || document.documentElement).appendChild(bar);
+
+  const sync = () => {
+    chrome.storage.local.get(
+      [CUSTOMER_KEY, ACTIVE_FILTER_KEY, CURRENT_CUSTOMER_KEY, TAGGING_ENABLED_KEY, OVERLAY_VISIBLE_KEY],
+      (data) => {
+        const customers = Array.isArray(data[CUSTOMER_KEY]) ? data[CUSTOMER_KEY].filter(Boolean) : [];
+
+        const filterOptions = [{ value: 'ALL', label: 'All customers' }, ...customers.map((c) => ({ value: c, label: c }))];
+        filterDd.setOptions(filterOptions);
+
+        const active = data[ACTIVE_FILTER_KEY] && (data[ACTIVE_FILTER_KEY] === 'ALL' || customers.includes(data[ACTIVE_FILTER_KEY]))
+          ? data[ACTIVE_FILTER_KEY]
+          : 'ALL';
+        filterDd.setValue(active, active === 'ALL' ? 'All customers' : active);
+
+        const tagOptions = [{ value: '__NONE__', label: 'Select customer…' }, ...customers.map((c) => ({ value: c, label: c }))];
+        tagDd.setOptions(tagOptions);
+
+        const current = data[CURRENT_CUSTOMER_KEY];
+        if (current && current !== '__ALL__' && customers.includes(current)) {
+          tagDd.setValue(current, current);
+        } else if (active !== 'ALL') {
+          tagDd.setValue(active, active);
+        } else {
+          tagDd.setValue('__NONE__', 'Select customer…');
+        }
+
+        updateToggleBtn(!!data[TAGGING_ENABLED_KEY]);
+
+        const visible = !!data[OVERLAY_VISIBLE_KEY];
+        bar.setAttribute('data-hidden', visible ? 'false' : 'true');
+
+        // If the Esc banner exists, re-position it so it doesn't overlap the bar/menu.
+        if (document.getElementById(TAGGING_BANNER_ID)) {
+          positionTaggingBanner();
+        }
+      }
+    );
+  };
+
+  sync();
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    if (
+      changes[CUSTOMER_KEY] ||
+      changes[ACTIVE_FILTER_KEY] ||
+      changes[CURRENT_CUSTOMER_KEY] ||
+      changes[TAGGING_ENABLED_KEY] ||
+      changes[OVERLAY_VISIBLE_KEY]
+    ) {
+      sync();
+    }
+  });
+}
+
+// Create the workspace bar in the top frame.
+// Visibility is controlled via `OVERLAY_VISIBLE_KEY`.
+setTimeout(() => {
+  try {
+    ensureWorkspaceBar();
+  } catch (e) {
+    // Keep failures silent; overlay is an optional enhancement.
+  }
+}, 0);
 
 function getPageKey() {
   // Use a host-wide key so tags apply across GS4PM sections (personas, products, dropdowns, etc.)
@@ -413,15 +894,24 @@ function findTaggableElement(eventOrNode) {
     ? eventOrNode.composedPath()
     : [eventOrNode.target || eventOrNode];
 
-  const taggableSelector = [
+  const hasCards = Boolean(
+    document.querySelector('article[data-omega-attribute-referenceid], article[data-testid^="card-"]')
+  );
+
+  const taggableSelectors = [
     'article[data-omega-attribute-referenceid]',
     'article[data-testid^="card-"]',
-    'div[data-omega-element="explore-card"]',
-    '[role="option"]',
-    'div[data-test-id^="library-drop-target"]',
-    '[data-item-id]',
-    '[data-omega-attribute-contentid]',
-  ].join(', ');
+  ];
+
+  if (location.pathname.startsWith('/genstudio/content')) {
+    taggableSelectors.push('div[data-omega-element="explore-card"]');
+  }
+
+  if (!hasCards) {
+    taggableSelectors.push('[role="option"]', 'div[data-test-id^="library-drop-target"]');
+  }
+
+  const taggableSelector = taggableSelectors.join(', ');
 
   const candidates = Array.from(path);
 
@@ -2625,6 +3115,45 @@ function startTagging(customer) {
 
   showTaggingBanner();
 
+  const clearHoverOutline = () => {
+    if (lastOutlinedContainer) {
+      lastOutlinedContainer.style.outline = '';
+      lastOutlinedContainer.style.outlineOffset = '';
+      lastOutlinedContainer = null;
+    }
+  };
+
+  const hasCards = Boolean(
+    document.querySelector('article[data-omega-attribute-referenceid], article[data-testid^="card-"]')
+  );
+
+  const getHoverTarget = el => {
+    if (!el || !(el instanceof Element)) return null;
+    if (el.matches('article[data-omega-attribute-referenceid], article[data-testid^="card-"], div[data-omega-element="explore-card"]')) {
+      return el;
+    }
+    if (!hasCards && (el.getAttribute('role') === 'option' || el.closest('[role="option"]'))) {
+      return getDisplayContainer(el) || el;
+    }
+    if (!hasCards && el.matches('div[data-test-id^="library-drop-target"]')) {
+      return el;
+    }
+    return null;
+  };
+
+  const applyHoverOutline = target => {
+    if (!target) {
+      clearHoverOutline();
+      return;
+    }
+    if (lastOutlinedContainer && lastOutlinedContainer !== target) {
+      clearHoverOutline();
+    }
+    lastOutlinedContainer = target;
+    lastOutlinedContainer.style.outline = '2px dashed #00bcd4';
+    lastOutlinedContainer.style.outlineOffset = '2px';
+  };
+
   escapeHandler = (e) => {
     if (!tagging) return;
     if (e.key !== 'Escape') return;
@@ -2645,38 +3174,36 @@ function startTagging(customer) {
 
   hoverHandler = e => {
     if (!tagging) return;
+    // Allow interacting with the workspace bar while tagging is enabled.
+    if (e?.target instanceof Element && e.target.closest && e.target.closest(`#${OVERLAY_ID}`)) return;
     const el = findTaggableElement(e);
-    if (el) {
-      const container = getDisplayContainer(el) || el;
-      if (lastOutlinedContainer && lastOutlinedContainer !== container) {
-        lastOutlinedContainer.style.outline = '';
-      }
-      container.style.outline = '2px dashed #00bcd4';
-      lastOutlinedContainer = container;
-    }
+    applyHoverOutline(getHoverTarget(el));
   };
 
   const mouseoutHandler = e => {
-    const path = e.composedPath ? e.composedPath() : [e.target];
-    path.forEach(node => {
-      if (node instanceof Element) {
-        node.style.outline = '';
-      }
-    });
+    if (!lastOutlinedContainer) return;
+    const related = e.relatedTarget;
+    const targetIsWithinOutline = e.target instanceof Element
+      && (e.target === lastOutlinedContainer || lastOutlinedContainer.contains(e.target));
+    const relatedIsWithinOutline = related instanceof Element
+      && (related === lastOutlinedContainer || lastOutlinedContainer.contains(related));
+    if (targetIsWithinOutline && !relatedIsWithinOutline) {
+      clearHoverOutline();
+    }
   };
   startTagging.mouseoutHandler = mouseoutHandler;
 
   clickHandler = e => {
     if (!tagging) return;
+    // Allow interacting with the workspace bar while tagging is enabled.
+    if (e?.target instanceof Element && e.target.closest && e.target.closest(`#${OVERLAY_ID}`)) return;
     e.preventDefault();
     e.stopPropagation();
 
     const taggableEl = findTaggableElement(e);
     if (!taggableEl) return;
 
-    const container = getDisplayContainer(taggableEl) || taggableEl;
-    container.style.outline = '';
-    if (lastOutlinedContainer === container) lastOutlinedContainer = null;
+    clearHoverOutline();
 
     const selector = getUniqueSelector(taggableEl);
     console.log('[GS4PM Filter] Click-to-tag selector', selector);
@@ -2726,6 +3253,7 @@ function stopTagging() {
 
   if (lastOutlinedContainer) {
     lastOutlinedContainer.style.outline = '';
+    lastOutlinedContainer.style.outlineOffset = '';
     lastOutlinedContainer = null;
   }
 
@@ -2744,7 +3272,7 @@ function showTaggingBanner() {
   banner.textContent = 'Press Esc to exit tagging mode';
   banner.style.position = 'fixed';
   banner.style.left = '0px'; // positioned by positionTaggingBanner()
-  banner.style.bottom = '28px';
+  banner.style.bottom = '28px'; // may be overridden in positionTaggingBanner()
   banner.style.transform = 'translateX(-50%)';
   banner.style.padding = '10px 14px';
   banner.style.borderRadius = '999px';
@@ -2800,6 +3328,19 @@ function detectLeftNavWidth() {
 function positionTaggingBanner() {
   const banner = document.getElementById(TAGGING_BANNER_ID);
   if (!banner) return;
+
+  // When the workspace bar is visible (or a custom dropdown is open),
+  // place the banner at the top so it never blocks the bar/menu.
+  const overlay = document.getElementById(OVERLAY_ID);
+  const overlayVisible = overlay && overlay.getAttribute('data-hidden') !== 'true';
+  const anyMenuOpen = overlay && overlay.querySelector('.dd[data-open="true"]');
+  if (overlayVisible || anyMenuOpen) {
+    banner.style.top = '14px';
+    banner.style.bottom = '';
+  } else {
+    banner.style.top = '';
+    banner.style.bottom = '28px';
+  }
 
   const navW = detectLeftNavWidth();
   const vw = window.innerWidth || document.documentElement.clientWidth || 0;

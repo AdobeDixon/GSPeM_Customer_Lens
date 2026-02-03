@@ -33,6 +33,15 @@
   "background": {
     "service_worker": "background.js"
   },
+  "commands": {
+    "toggle-overlay-bar": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+O",
+        "mac": "Command+Shift+O"
+      },
+      "description": "Toggle the bottom workspace bar"
+    }
+  },
   "content_scripts": [
     {
       "matches": [
