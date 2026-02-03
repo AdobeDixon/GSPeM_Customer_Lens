@@ -33,6 +33,7 @@ let dropdownRetryTimeouts = [];
 let dropdownItemObserver = null;
 let isTemporarilyIncreasingHeight = false; // Flag to prevent observer from resetting height during watchdog re-filtering
 
+const CUSTOMER_KEY = 'gs4pm_customers';
 const CURRENT_CUSTOMER_KEY = 'gs4pm_current_customer';
 const ACTIVE_FILTER_KEY = 'gs4pm_active_filter_customer';
 const TAGGING_ENABLED_KEY = 'gs4pm_tagging_enabled';
@@ -42,6 +43,116 @@ console.log('[GS4PM Filter] contentScript loaded in frame:', window.location.hre
 console.log('[GS4PM Filter] Initializing on GS4PM page:', window.location.href);
 
 let lastPathname = location.pathname;
+
+// ===== Keyboard shortcut: Cmd/Ctrl+K cycles customers =====
+
+const FILTER_CYCLE_TOAST_ID = 'gs4pm-filter-cycle-toast';
+
+function isTextEntryTarget(target) {
+  const el = target instanceof Element ? target : null;
+  if (!el) return false;
+  const tag = (el.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+  if (el.isContentEditable) return true;
+  // Some Spectrum components wrap inputs; don't steal Cmd/Ctrl+K from them.
+  if (el.closest && el.closest('input, textarea, [contenteditable="true"], [role="textbox"]')) return true;
+  return false;
+}
+
+function getToastDocument() {
+  try {
+    // Prefer top-frame so the toast is visible even if the keydown happens in an iframe.
+    return window.top && window.top.document ? window.top.document : document;
+  } catch {
+    return document;
+  }
+}
+
+function showFilterCycleToast(label) {
+  const doc = getToastDocument();
+  const existing = doc.getElementById(FILTER_CYCLE_TOAST_ID);
+  if (existing) existing.remove();
+
+  const el = doc.createElement('div');
+  el.id = FILTER_CYCLE_TOAST_ID;
+  el.textContent = label;
+  el.style.position = 'fixed';
+  el.style.left = '50%';
+  el.style.bottom = '18px';
+  el.style.transform = 'translateX(-50%)';
+  el.style.zIndex = '2147483647';
+  el.style.padding = '10px 12px';
+  el.style.borderRadius = '999px';
+  el.style.background = 'rgba(0, 0, 0, 0.78)';
+  el.style.color = 'rgba(255, 255, 255, 0.92)';
+  el.style.border = '1px solid rgba(255, 255, 255, 0.14)';
+  el.style.boxShadow = '0 12px 28px rgba(0,0,0,0.40)';
+  el.style.font = '600 12px system-ui, -apple-system, Segoe UI, sans-serif';
+  el.style.letterSpacing = '0.01em';
+  el.style.maxWidth = 'min(92vw, 420px)';
+  el.style.whiteSpace = 'nowrap';
+  el.style.overflow = 'hidden';
+  el.style.textOverflow = 'ellipsis';
+  el.style.opacity = '0';
+  el.style.transition = 'opacity 120ms ease, transform 120ms ease';
+
+  (doc.body || doc.documentElement).appendChild(el);
+
+  // animate in
+  requestAnimationFrame(() => {
+    el.style.opacity = '1';
+    el.style.transform = 'translateX(-50%) translateY(-2px)';
+  });
+
+  // animate out
+  setTimeout(() => {
+    el.style.opacity = '0';
+    el.style.transform = 'translateX(-50%) translateY(2px)';
+    setTimeout(() => el.remove(), 220);
+  }, 1100);
+}
+
+function cycleActiveCustomerFilter(direction = 1) {
+  if (!chrome.runtime || !chrome.runtime.id) return;
+
+  chrome.storage.local.get([CUSTOMER_KEY, ACTIVE_FILTER_KEY], (data) => {
+    const customers = Array.isArray(data[CUSTOMER_KEY]) ? data[CUSTOMER_KEY].filter(Boolean) : [];
+    if (!customers.length) return;
+
+    const current = data[ACTIVE_FILTER_KEY] || 'ALL';
+    const options = ['ALL', ...customers];
+    const idx = Math.max(0, options.indexOf(current));
+    const nextIdx = (idx + (direction < 0 ? -1 : 1) + options.length) % options.length;
+    const next = options[nextIdx];
+
+    chrome.storage.local.set({ [ACTIVE_FILTER_KEY]: next }, () => {
+      const label = next === 'ALL' ? 'Filter: All customers' : `Filter: ${next}`;
+      showFilterCycleToast(label);
+    });
+  });
+}
+
+document.addEventListener(
+  'keydown',
+  (e) => {
+    if (!e) return;
+    if (e.defaultPrevented) return;
+    if (e.repeat) return;
+    if (isTextEntryTarget(e.target)) return;
+
+    const key = (e.key || '').toLowerCase();
+    const hasMod = (e.metaKey || e.ctrlKey) && !e.altKey;
+    if (!hasMod || key !== 'k') return;
+
+    // Cmd/Ctrl+K is commonly used by apps for command palettes; we intentionally override it on GS4PM.
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Shift reverses direction (nice for power-users).
+    cycleActiveCustomerFilter(e.shiftKey ? -1 : 1);
+  },
+  true
+);
 
 function getPageKey() {
   // Use a host-wide key so tags apply across GS4PM sections (personas, products, dropdowns, etc.)
@@ -2703,7 +2814,8 @@ document.addEventListener('contextmenu', (e) => {
   const el = findTaggableElement(e);
   if (!el) {
     lastRightClickedSelector = null;
-    console.warn('[GS4PM Filter] Right-clicked but no taggable element found');
+    // Right-clicking whitespace/non-cards is common in GenStudio; keep this silent.
+    // (Chrome's Extensions "Errors" UI surfaces console.warn entries, which is noisy.)
     return;
   }
   lastRightClickedSelector = getUniqueSelector(el);

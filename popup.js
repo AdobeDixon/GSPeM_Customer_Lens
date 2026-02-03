@@ -38,8 +38,32 @@ const toggleTaggingBtn = document.getElementById('toggle-tagging');
 const newCustomerInput = document.getElementById('new-customer');
 const addCustomerBtn = document.getElementById('add-customer');
 const disabledSection = document.getElementById('disabled-section');
+const manageSection = document.getElementById('manage-section');
+const githubLink = document.getElementById('github-link');
+const versionText = document.getElementById('version-text');
 
 let taggingEnabled = false;
+
+function wireFooter() {
+  try {
+    const manifest = chrome.runtime.getManifest?.();
+    const homepageUrl = manifest?.homepage_url || 'https://github.com/';
+
+    if (versionText && manifest?.version) {
+      versionText.textContent = `v${manifest.version}`;
+    }
+
+    if (githubLink) {
+      githubLink.href = homepageUrl;
+      githubLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        chrome.tabs.create({ url: homepageUrl });
+      });
+    }
+  } catch {
+    // noop – footer is optional
+  }
+}
 
 function setUiDisabled(disabled) {
   if (disabledSection) disabledSection.hidden = !disabled;
@@ -50,6 +74,8 @@ function setUiDisabled(disabled) {
 }
 
 function focusAddCustomerInput() {
+  // `manageSection` is a <details> in the popup UI.
+  if (manageSection && typeof manageSection.open === 'boolean') manageSection.open = true;
   if (!newCustomerInput) return;
   newCustomerInput.scrollIntoView({ block: 'center' });
   newCustomerInput.focus();
@@ -282,6 +308,7 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   const activeTab = tabs && tabs.length ? tabs[0] : null;
   const isAllowed = isGs4pmUrl(activeTab?.url || '');
   setUiDisabled(!isAllowed);
+  wireFooter();
   if (!isAllowed) return;
   loadStateAndCustomers();
   checkOpenAddCustomerFlag();

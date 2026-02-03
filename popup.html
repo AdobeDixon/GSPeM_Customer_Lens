@@ -2,16 +2,21 @@
 <html>
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
-      --bg: #121212;
-      --card-bg: #181818;
-      --accent: #1DB954;
-      --accent-soft: rgba(29, 185, 84, 0.22);
-      --text: #fdfdfd;
-      --muted: #b3b3b3;
-      --border: #282828;
-      --radius: 10px;
+      --bg: #0b0f14;
+      --surface: rgba(255, 255, 255, 0.04);
+      --surface-2: rgba(255, 255, 255, 0.06);
+      --text: rgba(255, 255, 255, 0.92);
+      --muted: rgba(255, 255, 255, 0.62);
+      --muted-2: rgba(255, 255, 255, 0.46);
+      --border: rgba(255, 255, 255, 0.10);
+      --border-2: rgba(255, 255, 255, 0.06);
+      --accent: #2ee071;
+      --accent-soft: rgba(46, 224, 113, 0.20);
+      --danger: #ff5470;
+      --radius: 14px;
     }
 
     * { box-sizing: border-box; }
@@ -19,221 +24,351 @@
     body {
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       margin: 0;
-      padding: 10px;
-      min-width: 280px;
-      background: radial-gradient(circle at top left, #202020 0, #121212 55%, #050505 100%);
+      padding: 12px;
+      min-width: 320px;
+      background:
+        radial-gradient(900px 420px at 0% 0%, rgba(46, 224, 113, 0.10), transparent 55%),
+        radial-gradient(620px 260px at 100% 0%, rgba(114, 139, 255, 0.11), transparent 52%),
+        var(--bg);
       color: var(--text);
     }
 
     .popup {
-      background: linear-gradient(145deg, rgba(255,255,255,0.02), rgba(0,0,0,0.35));
-      border-radius: 14px;
-      border: 1px solid var(--border);
-      padding: 10px 12px 12px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(0,0,0,0.18));
+      border-radius: calc(var(--radius) + 2px);
+      border: 1px solid var(--border-2);
+      padding: 12px;
       box-shadow:
-        0 14px 28px rgba(0, 0, 0, 0.55),
-        0 0 0 1px rgba(255, 255, 255, 0.02);
+        0 18px 40px rgba(0, 0, 0, 0.55),
+        inset 0 1px 0 rgba(255, 255, 255, 0.05);
     }
 
     .header {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: space-between;
-      margin-bottom: 8px;
+      gap: 10px;
+      padding-bottom: 10px;
+      margin-bottom: 10px;
+      border-bottom: 1px solid var(--border-2);
     }
 
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .app-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      box-shadow: 0 10px 18px rgba(0, 0, 0, 0.35);
+      border: 1px solid var(--border-2);
+      flex: 0 0 auto;
+    }
+
+    .title-wrap { min-width: 0; }
+
     .title {
-      font-size: 13px;
-      font-weight: 600;
-      letter-spacing: 0.03em;
-      text-transform: uppercase;
-      color: var(--muted);
+      font-size: 14px;
+      font-weight: 650;
+      letter-spacing: 0.01em;
+      line-height: 1.15;
+      margin: 0;
     }
 
     .badge {
-      font-size: 10px;
-      padding: 2px 6px;
+      font-size: 11px;
+      padding: 5px 9px;
       border-radius: 999px;
-      border: 1px solid var(--accent-soft);
-      background: rgba(18, 18, 18, 0.95);
-      color: var(--accent);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: rgba(0, 0, 0, 0.28);
+      color: var(--muted);
+      white-space: nowrap;
     }
 
     .section {
       border-radius: var(--radius);
-      padding: 8px 8px 9px;
-      background: var(--card-bg);
-      border: 1px solid rgba(255,255,255,0.03);
-      margin-top: 6px;
+      padding: 10px;
+      background: var(--surface);
+      border: 1px solid var(--border-2);
+      margin-top: 10px;
     }
 
     label {
-      font-size: 11px;
+      font-size: 12px;
       display: block;
-      margin-bottom: 3px;
       color: var(--muted);
     }
 
     .pill-label {
-      font-size: 10px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      margin-bottom: 3px;
+      font-size: 12px;
+      color: var(--text);
+      font-weight: 650;
+      margin: 0 0 8px 0;
     }
 
     select,
     input {
       width: 100%;
-      margin-top: 0;
-      margin-bottom: 2px;
-      padding: 5px 7px;
-      border-radius: 7px;
+      margin-top: 6px;
+      padding: 8px 10px;
+      border-radius: 12px;
       border: 1px solid var(--border);
-      background: #101010;
+      background: rgba(0, 0, 0, 0.30);
       color: var(--text);
-      font-size: 12px;
+      font-size: 13px;
       outline: none;
     }
 
     select:focus,
     input:focus {
       border-color: var(--accent);
-      box-shadow: 0 0 0 1px var(--accent-soft);
+      box-shadow: 0 0 0 3px var(--accent-soft);
     }
 
     select {
       appearance: none;
-      background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
-                        linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+      background-image:
+        linear-gradient(45deg, transparent 50%, rgba(255,255,255,0.65) 50%),
+        linear-gradient(135deg, rgba(255,255,255,0.65) 50%, transparent 50%);
       background-position:
-        calc(100% - 12px) calc(50% - 2px),
-        calc(100% - 8px) calc(50% - 2px);
+        calc(100% - 14px) calc(50% - 2px),
+        calc(100% - 9px) calc(50% - 2px);
       background-size: 6px 6px, 6px 6px;
       background-repeat: no-repeat;
-      padding-right: 22px;
+      padding-right: 28px;
     }
 
     .row {
       display: flex;
-      gap: 6px;
-      margin-top: 4px;
+      gap: 8px;
+      margin-top: 10px;
     }
 
     .row > .grow { flex: 1; }
 
     button {
       width: 100%;
-      margin-top: 2px;
+      margin-top: 0;
       border-radius: 999px;
       border: 1px solid var(--border);
-      padding: 5px 8px;
-      font-size: 11px;
-      font-weight: 500;
-      letter-spacing: 0.02em;
-      text-transform: uppercase;
+      padding: 9px 10px;
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: 0.01em;
       cursor: pointer;
-      background: #181818;
+      background: rgba(0, 0, 0, 0.22);
       color: var(--text);
       transition: background 120ms ease, border-color 120ms ease, transform 60ms ease, box-shadow 120ms ease;
     }
 
     button:hover {
-      background: #222222;
+      background: rgba(255, 255, 255, 0.08);
       border-color: rgba(255,255,255,0.12);
     }
 
     button:active { transform: translateY(1px); }
 
     .btn-primary {
-      background: linear-gradient(135deg, var(--accent), #2ee071);
-      border-color: rgba(255,255,255,0.12);
-      color: #051106;
-      box-shadow: 0 6px 18px rgba(29, 185, 84, 0.35);
+      background: linear-gradient(135deg, var(--accent), #68ffb0);
+      border-color: rgba(255,255,255,0.10);
+      color: rgba(0, 0, 0, 0.88);
+      box-shadow: 0 10px 22px rgba(46, 224, 113, 0.25);
     }
 
     .btn-primary:hover {
-      background: linear-gradient(135deg, #22c35d, #46ea86);
+      background: linear-gradient(135deg, #39ea84, #7dffbe);
     }
 
     .btn-primary.off {
-      background: #181818;
-      color: var(--muted);
+      background: rgba(0, 0, 0, 0.22);
+      color: rgba(255, 255, 255, 0.86);
       box-shadow: none;
       border-color: var(--border);
     }
 
     small {
-      font-size: 10px;
-      color: var(--muted);
+      font-size: 11px;
+      color: var(--muted-2);
       display: block;
-      margin-top: 3px;
+      margin-top: 8px;
       line-height: 1.3;
     }
 
-    .hint {
-      margin-top: 6px;
-      font-size: 10px;
-      color: var(--muted);
+    .callout {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      padding: 10px;
+      border-radius: var(--radius);
+      border: 1px solid rgba(255, 84, 112, 0.28);
+      background: rgba(255, 84, 112, 0.08);
+      margin-top: 10px;
     }
 
     .disabled-note {
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.82);
+      line-height: 1.35;
+    }
+
+    .disabled-note strong { color: rgba(255, 255, 255, 0.95); }
+
+    details.section {
+      padding: 0;
+      overflow: hidden;
+    }
+
+    details.section > summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 10px;
+      user-select: none;
+      font-size: 12px;
+      font-weight: 650;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    details.section > summary::-webkit-details-marker { display: none; }
+
+    .summary-hint {
       font-size: 11px;
-      color: var(--muted);
-      line-height: 1.4;
+      color: var(--muted-2);
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    details.section[open] > summary {
+      border-bottom: 1px solid var(--border-2);
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .details-body { padding: 10px; }
+
+    .footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border-2);
+      color: var(--muted-2);
+      font-size: 11px;
+    }
+
+    a {
+      color: rgba(255, 255, 255, 0.84);
+      text-decoration: none;
+    }
+
+    a:hover { text-decoration: underline; }
+
+    .link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border-2);
+      background: rgba(0,0,0,0.20);
+      white-space: nowrap;
+    }
+
+    .link:hover {
+      background: rgba(255,255,255,0.06);
+      text-decoration: none;
+    }
+
+    .kbd {
+      font-variant-numeric: tabular-nums;
+      border: 1px solid var(--border-2);
+      background: rgba(0,0,0,0.22);
+      padding: 1px 6px;
+      border-radius: 7px;
+      color: rgba(255, 255, 255, 0.78);
+    }
+
+    /* Disabled visuals (JS sets disabled on controls) */
+    select:disabled,
+    input:disabled,
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
     }
   </style>
 </head>
 <body>
   <div class="popup">
     <div class="header">
-      <div class="title">GS4PM Customer Filter</div>
-      <div class="badge">Demo helper</div>
+      <div class="brand">
+        <img class="app-icon" src="icons/logo.png" alt="" />
+        <div class="title-wrap">
+          <div class="title">Customer Lens</div>
+          <small>Filter + tag GS4PM content by customer.</small>
+        </div>
+      </div>
+      <div class="badge">GenStudio</div>
     </div>
 
-    <div class="section" id="disabled-section" hidden>
-      <div class="pill-label">GS4PM only</div>
-      <div class="disabled-note">
-        Open GenStudio for Performance Marketing on
-        <strong>experience.adobe.com</strong> (URL contains <strong>genstudio</strong>)
-        to use this extension.
+    <div id="disabled-section" hidden>
+      <div class="callout" role="status" aria-live="polite">
+        <div style="font-weight: 800; color: var(--danger); line-height: 1;">!</div>
+        <div class="disabled-note">
+          This extension only activates on <strong>experience.adobe.com</strong> pages where the URL contains <strong>genstudio</strong>.
+        </div>
       </div>
     </div>
 
     <div class="section" id="filter-section">
-      <div class="pill-label">View filter</div>
+      <div class="pill-label">Filter</div>
       <label for="filter-customer-select">Show content for</label>
       <select id="filter-customer-select"></select>
-      <small>Changing this instantly filters personas, products, assets, templates, and brands in GS4PM.</small>
+      <small>Updates the view instantly across GS4PM (personas, products, assets, templates, brands).</small>
     </div>
 
     <div class="section" id="tag-section">
       <div class="pill-label">Tagging</div>
-      <label for="tag-customer-select">Tag elements as customer</label>
+      <label for="tag-customer-select">Tag items for</label>
       <select id="tag-customer-select"></select>
       <div class="row">
         <button id="toggle-tagging" class="btn-primary off">Enable tagging</button>
       </div>
-      <small>When tagging is enabled, click any card/tile in GS4PM to add or remove its tag for the selected customer.</small>
+      <small>When enabled, click a tile/card/option in GS4PM to toggle its customer tag. Press <span class="kbd">Esc</span> to stop tagging.</small>
     </div>
 
-    <div class="section" id="manage-section">
-      <div class="pill-label">Customers</div>
-      <div class="row">
-        <div class="grow">
-          <label for="new-customer">Add customer</label>
-          <input id="new-customer" type="text" placeholder="e.g. Ladbrokes" />
+    <details class="section" id="manage-section">
+      <summary>
+        Add customer
+        <span class="summary-hint">stored locally</span>
+      </summary>
+      <div class="details-body">
+        <label for="new-customer">Customer name</label>
+        <div class="row">
+          <div class="grow">
+            <input id="new-customer" type="text" placeholder="e.g. Ladbrokes" />
+          </div>
+          <div style="align-self:flex-end; min-width:84px;">
+            <button id="add-customer">Add</button>
+          </div>
         </div>
-        <div style="align-self:flex-end; min-width:72px;">
-          <button id="add-customer">Add</button>
-        </div>
+        <small>Tip: you can also right‑click an item in GS4PM → <strong>Tag element</strong>.</small>
       </div>
-      <small>Customers are stored in Chrome sync so you can reuse them across GS4PM sections.</small>
-    </div>
+    </details>
 
-    <div class="hint">
-      Tip: You can also right-click any tile, asset, template, persona, product, or dropdown option in GS4PM and choose
-      “Tag element for current customer”.
+    <div class="footer">
+      <a class="link" id="github-link" href="#" aria-label="Open GitHub repository">
+        <span aria-hidden="true" style="font-weight:800;">⌂</span>
+        GitHub
+      </a>
+      <span id="version-text"></span>
     </div>
   </div>
 

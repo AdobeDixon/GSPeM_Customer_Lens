@@ -3,6 +3,7 @@
   "name": "GenStudio Customer Lens",
   "version": "4.0",
   "description": "Filter GenStudio for Performance Marketing by customer: tag personas, products, assets, templates and dropdown options, toggle tagging mode, and persist filters across GS4PM sections.",
+  "homepage_url": "https://github.com/",
   "permissions": [
     "storage",
     "scripting",
