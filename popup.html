@@ -1,0 +1,242 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root {
+      --bg: #121212;
+      --card-bg: #181818;
+      --accent: #1DB954;
+      --accent-soft: rgba(29, 185, 84, 0.22);
+      --text: #fdfdfd;
+      --muted: #b3b3b3;
+      --border: #282828;
+      --radius: 10px;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 10px;
+      min-width: 280px;
+      background: radial-gradient(circle at top left, #202020 0, #121212 55%, #050505 100%);
+      color: var(--text);
+    }
+
+    .popup {
+      background: linear-gradient(145deg, rgba(255,255,255,0.02), rgba(0,0,0,0.35));
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      padding: 10px 12px 12px;
+      box-shadow:
+        0 14px 28px rgba(0, 0, 0, 0.55),
+        0 0 0 1px rgba(255, 255, 255, 0.02);
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .title {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .badge {
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 999px;
+      border: 1px solid var(--accent-soft);
+      background: rgba(18, 18, 18, 0.95);
+      color: var(--accent);
+    }
+
+    .section {
+      border-radius: var(--radius);
+      padding: 8px 8px 9px;
+      background: var(--card-bg);
+      border: 1px solid rgba(255,255,255,0.03);
+      margin-top: 6px;
+    }
+
+    label {
+      font-size: 11px;
+      display: block;
+      margin-bottom: 3px;
+      color: var(--muted);
+    }
+
+    .pill-label {
+      font-size: 10px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 3px;
+    }
+
+    select,
+    input {
+      width: 100%;
+      margin-top: 0;
+      margin-bottom: 2px;
+      padding: 5px 7px;
+      border-radius: 7px;
+      border: 1px solid var(--border);
+      background: #101010;
+      color: var(--text);
+      font-size: 12px;
+      outline: none;
+    }
+
+    select:focus,
+    input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent-soft);
+    }
+
+    select {
+      appearance: none;
+      background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+                        linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+      background-position:
+        calc(100% - 12px) calc(50% - 2px),
+        calc(100% - 8px) calc(50% - 2px);
+      background-size: 6px 6px, 6px 6px;
+      background-repeat: no-repeat;
+      padding-right: 22px;
+    }
+
+    .row {
+      display: flex;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    .row > .grow { flex: 1; }
+
+    button {
+      width: 100%;
+      margin-top: 2px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      padding: 5px 8px;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      cursor: pointer;
+      background: #181818;
+      color: var(--text);
+      transition: background 120ms ease, border-color 120ms ease, transform 60ms ease, box-shadow 120ms ease;
+    }
+
+    button:hover {
+      background: #222222;
+      border-color: rgba(255,255,255,0.12);
+    }
+
+    button:active { transform: translateY(1px); }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), #2ee071);
+      border-color: rgba(255,255,255,0.12);
+      color: #051106;
+      box-shadow: 0 6px 18px rgba(29, 185, 84, 0.35);
+    }
+
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #22c35d, #46ea86);
+    }
+
+    .btn-primary.off {
+      background: #181818;
+      color: var(--muted);
+      box-shadow: none;
+      border-color: var(--border);
+    }
+
+    small {
+      font-size: 10px;
+      color: var(--muted);
+      display: block;
+      margin-top: 3px;
+      line-height: 1.3;
+    }
+
+    .hint {
+      margin-top: 6px;
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    .disabled-note {
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="popup">
+    <div class="header">
+      <div class="title">GS4PM Customer Filter</div>
+      <div class="badge">Demo helper</div>
+    </div>
+
+    <div class="section" id="disabled-section" hidden>
+      <div class="pill-label">GS4PM only</div>
+      <div class="disabled-note">
+        Open GenStudio for Performance Marketing on
+        <strong>experience.adobe.com</strong> (URL contains <strong>genstudio</strong>)
+        to use this extension.
+      </div>
+    </div>
+
+    <div class="section" id="filter-section">
+      <div class="pill-label">View filter</div>
+      <label for="filter-customer-select">Show content for</label>
+      <select id="filter-customer-select"></select>
+      <small>Changing this instantly filters personas, products, assets, templates, and brands in GS4PM.</small>
+    </div>
+
+    <div class="section" id="tag-section">
+      <div class="pill-label">Tagging</div>
+      <label for="tag-customer-select">Tag elements as customer</label>
+      <select id="tag-customer-select"></select>
+      <div class="row">
+        <button id="toggle-tagging" class="btn-primary off">Enable tagging</button>
+      </div>
+      <small>When tagging is enabled, click any card/tile in GS4PM to add or remove its tag for the selected customer.</small>
+    </div>
+
+    <div class="section" id="manage-section">
+      <div class="pill-label">Customers</div>
+      <div class="row">
+        <div class="grow">
+          <label for="new-customer">Add customer</label>
+          <input id="new-customer" type="text" placeholder="e.g. Ladbrokes" />
+        </div>
+        <div style="align-self:flex-end; min-width:72px;">
+          <button id="add-customer">Add</button>
+        </div>
+      </div>
+      <small>Customers are stored in Chrome sync so you can reuse them across GS4PM sections.</small>
+    </div>
+
+    <div class="hint">
+      Tip: You can also right-click any tile, asset, template, persona, product, or dropdown option in GS4PM and choose
+      “Tag element for current customer”.
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
