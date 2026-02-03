@@ -9,6 +9,8 @@ A Chrome extension that adds customer-focused filtering and tagging to **GenStud
 - Adds visual badges during tagging so you can see what’s tagged.
 - Keeps your active filter and customer list across GS4PM sections.
 - Adds a right‑click menu to tag the last clicked item.
+- Optional on-page **Workspace bar** (bottom overlay) so you don’t need to reopen the extension popup.
+- Keyboard shortcuts for power-users (see below).
 
 ## How it works 🧠
 
@@ -17,10 +19,13 @@ A Chrome extension that adds customer-focused filtering and tagging to **GenStud
   - Pick a customer to tag against.
   - Toggle tagging mode on/off.
   - Add new customers.
+- **On-page Workspace bar** (`contentScript.js`)
+  - Optional bottom overlay (top-frame only) with quick access to filter, tagging target, and tagging toggle.
 - **Content script** (`contentScript.js`)
   - Watches the GS4PM DOM and applies filters in real time.
   - Tags elements by storing a unique selector + customer.
   - Adds on‑screen badges while tagging is enabled.
+  - Shows an “Esc to exit tagging” banner (top-frame only) while tagging is enabled.
   - Tracks right‑click targets to support context‑menu tagging.
 - **Background service worker** (`background.js`)
   - Builds the right‑click context menu.
@@ -45,6 +50,35 @@ A Chrome extension that adds customer-focused filtering and tagging to **GenStud
 4. Pick a customer in **Tagging** and click **Enable tagging**.
 5. Click a tile/card/option in GS4PM to toggle its tag.
 6. (Optional) Right‑click any item and choose **Tag element → [customer]**.
+7. (Optional) Toggle the **Workspace bar** to get on-page controls without reopening the popup.
+
+## UI overview 🧩
+
+- **Popup**
+  - **Filter → “Show content for”**: sets the active customer filter (or “Show all customers”).
+  - **Tagging → “Tag items for”**: selects the customer you’ll tag items against.
+  - **Enable/Disable tagging**: when enabled, clicks on supported GS4PM tiles/cards/options toggle that item’s tag for the selected customer.
+  - **Workspace bar**: shows/hides the bottom on-page overlay (and displays its shortcut).
+  - **Add customer**: stored locally; also reachable via right-click → **Tag element → Add new customer…**
+  - **Disabled state**: the popup disables controls when the active tab is not a GS4PM URL (must be on `experience.adobe.com` and include `genstudio`).
+
+- **Workspace bar (bottom overlay, optional)**
+  - Appears at the bottom of the GS4PM page (top frame only).
+  - Provides quick access to: active filter, tagging target, tagging toggle, and a Hide button.
+  - Designed to stay usable even when tagging mode is enabled (so you can change settings without exiting tagging).
+
+## Keyboard shortcuts ⌨️
+
+- **Cycle active filter customer**: `Cmd/Ctrl + K`
+  - Cycles through `All customers` → each customer in your list.
+  - **Reverse direction**: hold **Shift** (`Cmd/Ctrl + Shift + K`).
+  - Does not trigger while typing in inputs/textareas/contenteditable fields.
+
+- **Toggle Workspace bar**: `Cmd/Ctrl + Shift + O`
+  - Shows/hides the bottom overlay bar.
+
+- **Exit tagging mode**: `Esc`
+  - While tagging is enabled, press **Esc** to stop tagging (it broadcasts across frames).
 
 ## Notes & tips 📝
 
