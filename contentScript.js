@@ -819,6 +819,19 @@ function updateTemplatesCssFilter(activeCustomer, tags) {
 // ===== Selector helpers =====
 
 function getUniqueSelector(el) {
+  // Content/assets + templates: prefer stable container ids if present on an ancestor.
+  const contentAncestor = el.closest && el.closest('[data-omega-attribute-contentid],[data-item-id]');
+  if (contentAncestor) {
+    const contentId = contentAncestor.getAttribute('data-omega-attribute-contentid');
+    if (contentId) {
+      return `[data-omega-attribute-contentid="${cssEscapeAttrValue(contentId)}"]`;
+    }
+    const itemId = contentAncestor.getAttribute('data-item-id');
+    if (itemId) {
+      return `[data-item-id="${cssEscapeAttrValue(itemId)}"]`;
+    }
+  }
+
   // Prefer a stable data-key used across grids and dropdown options
   const keyAncestor = el.closest && el.closest('[data-key]');
   if (keyAncestor) {
@@ -903,9 +916,13 @@ function findTaggableElement(eventOrNode) {
     'article[data-testid^="card-"]',
   ];
 
-  if (location.pathname.startsWith('/genstudio/content')) {
+  // GenStudio routes can be hash-based; don't rely only on `location.pathname`.
+  if (isContentAssetsPage() || window.location.href.includes('/genstudio/content')) {
     taggableSelectors.push('div[data-omega-element="explore-card"]');
   }
+
+  // Content/assets and templates tiles commonly expose stable ids on containers.
+  taggableSelectors.push('[data-item-id]', '[data-omega-attribute-contentid]');
 
   if (!hasCards) {
     taggableSelectors.push('[role="option"]', 'div[data-test-id^="library-drop-target"]');
@@ -3129,9 +3146,12 @@ function startTagging(customer) {
 
   const getHoverTarget = el => {
     if (!el || !(el instanceof Element)) return null;
-    if (el.matches('article[data-omega-attribute-referenceid], article[data-testid^="card-"], div[data-omega-element="explore-card"]')) {
-      return el;
-    }
+    const card = el.closest && el.closest('article[data-omega-attribute-referenceid], article[data-testid^="card-"], div[data-omega-element="explore-card"]');
+    if (card) return card;
+
+    // Content/assets + templates: outline the stable container so it's obvious what will be tagged.
+    const contentContainer = el.closest && el.closest('[data-item-id],[data-omega-attribute-contentid]');
+    if (contentContainer) return contentContainer;
     if (!hasCards && (el.getAttribute('role') === 'option' || el.closest('[role="option"]'))) {
       return getDisplayContainer(el) || el;
     }
