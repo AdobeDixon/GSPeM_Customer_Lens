@@ -53,5 +53,15 @@
       "run_at": "document_idle",
       "all_frames": true
     }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "icons/logo.png"
+      ],
+      "matches": [
+        "https://experience.adobe.com/*"
+      ]
+    }
   ]
 }

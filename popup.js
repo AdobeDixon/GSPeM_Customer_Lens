@@ -24,6 +24,29 @@ function sendMessageToActiveTab(message) {
     if (!isGs4pmUrl(activeTab.url || '')) return;
     const tabId = activeTab.id;
     if (!tabId) return;
+
+    // Prefer broadcasting via the background service worker so iframe-based GS4PM
+    // pages receive the message in the correct frame(s).
+    if (chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage({ type: 'GS4PM_BROADCAST', tabId, message }, (result) => {
+        if (chrome.runtime.lastError) {
+          // Fallback: try top-frame only
+          chrome.tabs.sendMessage(tabId, message, () => {
+            if (chrome.runtime.lastError) {
+              console.log('[GS4PM Filter][popup] No receiver for', message.type, '-', chrome.runtime.lastError.message);
+            }
+          });
+          return;
+        }
+
+        // Helpful diagnostics when nothing receives the broadcast (common when a tab is mid-navigation).
+        if (result && typeof result === 'object' && result.successCount === 0) {
+          console.log('[GS4PM Filter][popup] Broadcast had no receivers for', message.type, result);
+        }
+      });
+      return;
+    }
+
     chrome.tabs.sendMessage(tabId, message, () => {
       if (chrome.runtime.lastError) {
         console.log('[GS4PM Filter][popup] No receiver for', message.type, '-', chrome.runtime.lastError.message);
@@ -41,10 +64,8 @@ const disabledSection = document.getElementById('disabled-section');
 const manageSection = document.getElementById('manage-section');
 const githubLink = document.getElementById('github-link');
 const versionText = document.getElementById('version-text');
-const toggleOverlayBarBtn = document.getElementById('toggle-overlay-bar');
 
 let taggingEnabled = false;
-const OVERLAY_VISIBLE_KEY = 'gs4pm_overlay_visible';
 
 function wireFooter() {
   try {
@@ -67,18 +88,12 @@ function wireFooter() {
   }
 }
 
-function updateOverlayButtonUi(visible) {
-  if (!toggleOverlayBarBtn) return;
-  toggleOverlayBarBtn.textContent = visible ? 'Hide bottom bar' : 'Show bottom bar';
-}
-
 function setUiDisabled(disabled) {
   if (disabledSection) disabledSection.hidden = !disabled;
   [filterSelect, tagSelect, toggleTaggingBtn, newCustomerInput, addCustomerBtn].forEach((el) => {
     if (!el) return;
     el.disabled = !!disabled;
   });
-  if (toggleOverlayBarBtn) toggleOverlayBarBtn.disabled = !!disabled;
 }
 
 function focusAddCustomerInput() {
@@ -147,8 +162,10 @@ function renderCustomers(customers, currentTagCustomer, activeFilter) {
   // Build tag dropdown
   tagSelect.innerHTML = '';
   const placeholder = document.createElement('option');
-  placeholder.value = '__NONE__';
+  placeholder.value = '';
   placeholder.textContent = 'Select customer…';
+  placeholder.disabled = true;
+  placeholder.hidden = true;
   tagSelect.appendChild(placeholder);
 
   customers.forEach((c) => {
@@ -164,7 +181,7 @@ function renderCustomers(customers, currentTagCustomer, activeFilter) {
     tagSelect.value = safeFilter;
     saveCurrentCustomer(safeFilter);
   } else {
-    tagSelect.value = '__NONE__';
+    tagSelect.value = '';
     saveCurrentCustomer('__ALL__');
   }
 
@@ -193,8 +210,7 @@ function loadStateAndCustomers() {
       updateTaggingButtonUI();
 
       // Sync tagging state with the active tab
-      const effectiveTagCustomer =
-        tagSelect.value && tagSelect.value !== '__NONE__' ? tagSelect.value : null;
+  const effectiveTagCustomer = tagSelect.value ? tagSelect.value : null;
 
       if (taggingEnabled && effectiveTagCustomer) {
         saveCurrentCustomer(effectiveTagCustomer);
@@ -238,7 +254,7 @@ filterSelect.addEventListener('change', () => {
   const normalized = !val || val === 'ALL' ? 'ALL' : val;
   saveActiveFilter(normalized);
 
-  if ((tagSelect.value === '__NONE__' || !tagSelect.value) && normalized !== 'ALL') {
+  if (!tagSelect.value && normalized !== 'ALL') {
     tagSelect.value = normalized;
     saveCurrentCustomer(normalized);
   }
@@ -252,7 +268,7 @@ filterSelect.addEventListener('change', () => {
 // Tag select – controls CURRENT_CUSTOMER_KEY and live tagging target
 tagSelect.addEventListener('change', () => {
   const val = tagSelect.value;
-  if (!val || val === '__NONE__') {
+  if (!val) {
     saveCurrentCustomer('__ALL__');
     if (taggingEnabled) {
       taggingEnabled = false;
@@ -277,7 +293,7 @@ toggleTaggingBtn.addEventListener('click', () => {
 
   if (!taggingEnabled) {
     // Turning ON
-    if (!tagCustomer || tagCustomer === '__NONE__' || tagCustomer === 'ALL') {
+    if (!tagCustomer || tagCustomer === 'ALL') {
       const filterVal = filterSelect.value;
       if (filterVal && filterVal !== 'ALL') {
         tagCustomer = filterVal;
@@ -285,7 +301,7 @@ toggleTaggingBtn.addEventListener('click', () => {
       }
     }
 
-    if (!tagCustomer || tagCustomer === '__NONE__' || tagCustomer === 'ALL') {
+    if (!tagCustomer || tagCustomer === 'ALL') {
       console.log('[GS4PM Filter][popup] Cannot enable tagging – no customer selected.');
       taggingEnabled = false;
       saveTaggingEnabled(false);
@@ -317,20 +333,6 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   const isAllowed = isGs4pmUrl(activeTab?.url || '');
   setUiDisabled(!isAllowed);
   wireFooter();
-
-  if (toggleOverlayBarBtn) {
-    chrome.storage.local.get([OVERLAY_VISIBLE_KEY], (data) => {
-      updateOverlayButtonUi(!!data[OVERLAY_VISIBLE_KEY]);
-    });
-    toggleOverlayBarBtn.addEventListener('click', () => {
-      chrome.storage.local.get([OVERLAY_VISIBLE_KEY], (data) => {
-        const next = !data[OVERLAY_VISIBLE_KEY];
-        chrome.storage.local.set({ [OVERLAY_VISIBLE_KEY]: next }, () => {
-          updateOverlayButtonUi(next);
-        });
-      });
-    });
-  }
 
   if (!isAllowed) return;
   loadStateAndCustomers();

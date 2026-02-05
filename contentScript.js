@@ -10,7 +10,20 @@ function isGs4pmUrl(url) {
   }
 }
 
-const SHOULD_RUN = isGs4pmUrl(window.location.href);
+function isGs4pmContext() {
+  // In recent GS4PM builds, the main app UI may render inside iframes whose own URL
+  // does not include the `genstudio` token. We still need tagging listeners inside
+  // those frames as long as the *top frame* is a GS4PM tab.
+  if (isGs4pmUrl(window.location.href)) return true;
+  try {
+    if (window.top && window.top !== window && isGs4pmUrl(window.top.location.href)) return true;
+  } catch {
+    // Cross-origin: we can't inspect the top URL. Fall back to the frame URL only.
+  }
+  return false;
+}
+
+const SHOULD_RUN = isGs4pmContext();
 
 if (!SHOULD_RUN) {
   console.log('[GS4PM Filter] Skipping non-GS4PM page:', window.location.href);
@@ -175,8 +188,8 @@ function injectOverlayStyles() {
   style.id = OVERLAY_STYLE_ID;
   style.textContent = `
     :root{
-      --gs4pm-overlay-bg: rgba(38, 38, 38, 0.84);
-      --gs4pm-overlay-border: rgba(255, 255, 255, 0.12);
+      --gs4pm-overlay-bg: linear-gradient(180deg, rgba(42, 42, 42, 0.78), rgba(20, 20, 20, 0.82));
+      --gs4pm-overlay-border: rgba(255, 255, 255, 0.10);
       --gs4pm-overlay-text: rgba(255, 255, 255, 0.92);
       --gs4pm-overlay-muted: rgba(255, 255, 255, 0.64);
       --gs4pm-overlay-accent: #2ee071;
@@ -195,7 +208,7 @@ function injectOverlayStyles() {
       background: var(--gs4pm-overlay-bg);
       backdrop-filter: blur(10px);
       -webkit-backdrop-filter: blur(10px);
-      box-shadow: 0 18px 42px rgba(0,0,0,0.50);
+      box-shadow: 0 16px 36px rgba(0,0,0,0.42);
       color: var(--gs4pm-overlay-text);
       font: 650 12px system-ui, -apple-system, Segoe UI, sans-serif;
       letter-spacing: 0.01em;
@@ -206,21 +219,26 @@ function injectOverlayStyles() {
     #${OVERLAY_ID} .gs4pm-row{
       display:flex;
       align-items:center;
-      gap:10px;
-      padding:10px 12px;
+      gap:12px;
+      padding:12px 14px;
     }
-    #${OVERLAY_ID} .gs4pm-left{
+    #${OVERLAY_ID} .gs4pm-left,
+    #${OVERLAY_ID} .gs4pm-center,
+    #${OVERLAY_ID} .gs4pm-right{
       display:flex;
       align-items:center;
       gap:10px;
       min-width:0;
-      flex:1;
+    }
+    #${OVERLAY_ID} .gs4pm-left{
+      flex:1 1 auto;
+    }
+    #${OVERLAY_ID} .gs4pm-center{
+      flex:0 0 auto;
     }
     #${OVERLAY_ID} .gs4pm-right{
-      display:flex;
-      align-items:center;
-      gap:8px;
       flex:0 0 auto;
+      margin-left:auto;
     }
     #${OVERLAY_ID} .gs4pm-icon{
       width:22px;
@@ -234,30 +252,61 @@ function injectOverlayStyles() {
       display:inline-flex;
       align-items:center;
       gap:8px;
-      padding:8px 10px;
-      border-radius:14px;
+      padding:6px 8px;
+      border-radius:12px;
       border:1px solid rgba(255,255,255,0.10);
-      background: rgba(0,0,0,0.18);
+      background: rgba(255,255,255,0.06);
       min-width:0;
+      flex:0 1 auto;
+    }
+    #${OVERLAY_ID} .gs4pm-pill.gs4pm-stack{
+      flex-direction:column;
+      align-items:flex-start;
+      gap:4px;
+      padding:6px 10px;
     }
     #${OVERLAY_ID} .gs4pm-label{
       color: var(--gs4pm-overlay-muted);
-      font-weight:800;
+      font-weight:700;
+      font-size:10px;
+      letter-spacing:0.08em;
+      text-transform:uppercase;
       white-space:nowrap;
     }
     #${OVERLAY_ID} .gs4pm-btn{
       border:1px solid rgba(255,255,255,0.12);
-      background: rgba(0,0,0,0.20);
+      background: rgba(0,0,0,0.22);
       color: var(--gs4pm-overlay-text);
-      border-radius:999px;
-      padding:8px 10px;
-      font-weight:800;
+      border-radius:10px;
+      padding:6px 12px;
+      height:32px;
+      font-weight:700;
       cursor:pointer;
       transition: background 120ms ease, border-color 120ms ease, transform 60ms ease;
       white-space:nowrap;
     }
     #${OVERLAY_ID} .gs4pm-btn:hover{ background: rgba(255,255,255,0.08); }
     #${OVERLAY_ID} .gs4pm-btn:active{ transform: translateY(1px); }
+
+    #${OVERLAY_ID} .gs4pm-input{
+      border:1px solid rgba(255,255,255,0.12);
+      background: rgba(0,0,0,0.22);
+      color: var(--gs4pm-overlay-text);
+      border-radius:10px;
+      padding:6px 10px;
+      height:32px;
+      font-weight:600;
+      min-width:150px;
+      max-width:210px;
+      outline:none;
+    }
+    #${OVERLAY_ID} .gs4pm-input::placeholder{
+      color: var(--gs4pm-overlay-muted);
+    }
+    #${OVERLAY_ID} .gs4pm-input:focus{
+      border-color: var(--gs4pm-overlay-accent);
+      box-shadow: 0 0 0 3px var(--gs4pm-overlay-accent-soft);
+    }
 
     #${OVERLAY_ID} .gs4pm-btn-primary{
       background: linear-gradient(135deg, var(--gs4pm-overlay-accent), #68ffb0);
@@ -276,7 +325,8 @@ function injectOverlayStyles() {
     }
 
     /* Custom dropdown */
-    #${OVERLAY_ID} .dd{ position:relative; min-width:200px; max-width:320px; }
+    #${OVERLAY_ID} .dd{ position:relative; min-width:160px; max-width:230px; }
+
     #${OVERLAY_ID} .dd button{
       width:100%;
       display:flex;
@@ -286,10 +336,11 @@ function injectOverlayStyles() {
       border:1px solid rgba(255,255,255,0.12);
       background: rgba(0,0,0,0.22);
       color: var(--gs4pm-overlay-text);
-      border-radius:12px;
-      padding:8px 10px;
+      border-radius:10px;
+      padding:6px 10px;
       cursor:pointer;
-      font-weight:700;
+      font-weight:600;
+      height:32px;
     }
     #${OVERLAY_ID} .dd button:focus{
       outline:none;
@@ -334,6 +385,27 @@ function injectOverlayStyles() {
     #${OVERLAY_ID} .dd .opt[data-selected="true"]{
       background: rgba(46,224,113,0.16);
       border: 1px solid rgba(46,224,113,0.22);
+    }
+
+    #${OVERLAY_ID} .gs4pm-add-pill .gs4pm-input{
+      min-width:180px;
+      max-width:240px;
+    }
+
+    @media (max-width: 980px){
+      #${OVERLAY_ID} .gs4pm-row{ flex-wrap:wrap; }
+      #${OVERLAY_ID} .gs4pm-left,
+      #${OVERLAY_ID} .gs4pm-center{
+        flex:1 1 100%;
+      }
+      #${OVERLAY_ID} .gs4pm-right{
+        margin-left:auto;
+      }
+    }
+    @media (max-width: 640px){
+      #${OVERLAY_ID} .dd{ min-width:160px; max-width:210px; }
+      #${OVERLAY_ID} .gs4pm-input{ min-width:130px; max-width:170px; }
+      #${OVERLAY_ID} .gs4pm-add-pill .gs4pm-input{ min-width:150px; max-width:200px; }
     }
   `;
   (document.head || document.documentElement).appendChild(style);
@@ -430,12 +502,16 @@ function ensureWorkspaceBar() {
   const bar = document.createElement('div');
   bar.id = OVERLAY_ID;
   bar.setAttribute('data-hidden', 'true');
+  bar.setAttribute('tabindex', '0');
 
   const row = document.createElement('div');
   row.className = 'gs4pm-row';
 
   const left = document.createElement('div');
   left.className = 'gs4pm-left';
+
+  const center = document.createElement('div');
+  center.className = 'gs4pm-center';
 
   const icon = document.createElement('img');
   icon.className = 'gs4pm-icon';
@@ -448,7 +524,7 @@ function ensureWorkspaceBar() {
   icon.decoding = 'async';
 
   const filterPill = document.createElement('div');
-  filterPill.className = 'gs4pm-pill';
+  filterPill.className = 'gs4pm-pill gs4pm-stack';
   const filterLabel = document.createElement('div');
   filterLabel.className = 'gs4pm-label';
   filterLabel.textContent = 'Filter';
@@ -468,7 +544,7 @@ function ensureWorkspaceBar() {
   filterPill.appendChild(filterDd.el);
 
   const tagPill = document.createElement('div');
-  tagPill.className = 'gs4pm-pill';
+  tagPill.className = 'gs4pm-pill gs4pm-stack';
   const tagLabel = document.createElement('div');
   tagLabel.className = 'gs4pm-label';
   tagLabel.textContent = 'Tag';
@@ -476,10 +552,10 @@ function ensureWorkspaceBar() {
   const tagDd = createDropdown({
     label: 'Tag customer',
     placeholder: 'Select customer…',
-    options: [{ value: '__NONE__', label: 'Select customer…' }],
-    value: '__NONE__',
+    options: [],
+    value: null,
     onChange: (val) => {
-      if (!val || val === '__NONE__') {
+      if (!val) {
         chrome.storage.local.set({ [CURRENT_CUSTOMER_KEY]: '__ALL__' });
         return;
       }
@@ -495,6 +571,53 @@ function ensureWorkspaceBar() {
   tagPill.appendChild(tagLabel);
   tagPill.appendChild(tagDd.el);
 
+  const addPill = document.createElement('div');
+  addPill.className = 'gs4pm-pill gs4pm-add-pill';
+  const addLabel = document.createElement('div');
+  addLabel.className = 'gs4pm-label';
+  addLabel.textContent = 'Add';
+
+  const addInput = document.createElement('input');
+  addInput.type = 'text';
+  addInput.className = 'gs4pm-input';
+  addInput.placeholder = 'New customer';
+  addInput.setAttribute('aria-label', 'New customer name');
+
+  const addBtn = document.createElement('button');
+  addBtn.type = 'button';
+  addBtn.className = 'gs4pm-btn';
+  addBtn.textContent = 'Add';
+
+  const addCustomerFromBar = () => {
+    const name = addInput.value.trim();
+    if (!name) return;
+    chrome.storage.local.get([CUSTOMER_KEY], (data) => {
+      const existing = Array.isArray(data[CUSTOMER_KEY]) ? data[CUSTOMER_KEY].filter(Boolean) : [];
+      const updated = existing.includes(name) ? existing : [...existing, name];
+      chrome.storage.local.set(
+        {
+          [CUSTOMER_KEY]: updated,
+          [CURRENT_CUSTOMER_KEY]: name,
+          [ACTIVE_FILTER_KEY]: name
+        },
+        () => {
+          addInput.value = '';
+        }
+      );
+    });
+  };
+
+  addBtn.addEventListener('click', addCustomerFromBar);
+  addInput.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    addCustomerFromBar();
+  });
+
+  addPill.appendChild(addLabel);
+  addPill.appendChild(addInput);
+  addPill.appendChild(addBtn);
+
   const toggleTagBtn = document.createElement('button');
   toggleTagBtn.type = 'button';
   toggleTagBtn.className = 'gs4pm-btn gs4pm-btn-primary';
@@ -506,7 +629,7 @@ function ensureWorkspaceBar() {
     toggleTagBtn.textContent = enabled ? 'Disable tagging' : 'Enable tagging';
   };
 
-  toggleTagBtn.addEventListener('click', () => {
+  const toggleTaggingFromBar = () => {
     chrome.storage.local.get([TAGGING_ENABLED_KEY], (data) => {
       const enabled = !!data[TAGGING_ENABLED_KEY];
       if (enabled) {
@@ -528,7 +651,9 @@ function ensureWorkspaceBar() {
         }
       );
     });
-  });
+  };
+
+  toggleTagBtn.addEventListener('click', toggleTaggingFromBar);
 
   const hideBtn = document.createElement('button');
   hideBtn.type = 'button';
@@ -544,10 +669,24 @@ function ensureWorkspaceBar() {
   left.appendChild(icon);
   left.appendChild(filterPill);
   left.appendChild(tagPill);
+  center.appendChild(addPill);
 
   row.appendChild(left);
+  row.appendChild(center);
   row.appendChild(right);
   bar.appendChild(row);
+
+  bar.addEventListener('pointerdown', () => {
+    if (document.activeElement !== bar) bar.focus();
+  });
+
+  bar.addEventListener('keydown', (e) => {
+    if (e.key !== ' ') return;
+    const target = e.target instanceof Element ? e.target : null;
+    if (target && target.closest('input, textarea, select, [contenteditable="true"]')) return;
+    e.preventDefault();
+    toggleTaggingFromBar();
+  });
 
   document.addEventListener(
     'pointerdown',
@@ -584,7 +723,7 @@ function ensureWorkspaceBar() {
           : 'ALL';
         filterDd.setValue(active, active === 'ALL' ? 'All customers' : active);
 
-        const tagOptions = [{ value: '__NONE__', label: 'Select customer…' }, ...customers.map((c) => ({ value: c, label: c }))];
+        const tagOptions = customers.map((c) => ({ value: c, label: c }));
         tagDd.setOptions(tagOptions);
 
         const current = data[CURRENT_CUSTOMER_KEY];
@@ -593,7 +732,7 @@ function ensureWorkspaceBar() {
         } else if (active !== 'ALL') {
           tagDd.setValue(active, active);
         } else {
-          tagDd.setValue('__NONE__', 'Select customer…');
+          tagDd.setValue(null, 'Select customer…');
         }
 
         updateToggleBtn(!!data[TAGGING_ENABLED_KEY]);

@@ -9,6 +9,7 @@ A Chrome extension that adds customer-focused filtering and tagging to **GenStud
 - Adds visual badges during tagging so you can see what’s tagged.
 - Keeps your active filter and customer list across GS4PM sections.
 - Adds a right‑click menu to tag the last clicked item.
+- Works reliably with GS4PM’s iframe-based UI (broadcasts actions to all frames, and can run in frames whose URL doesn’t include `genstudio` as long as the top tab is GS4PM).
 - Optional on-page **Workspace bar** (bottom overlay) so you don’t need to reopen the extension popup.
 - Keyboard shortcuts for power-users (see below).
 
@@ -72,6 +73,7 @@ A Chrome extension that adds customer-focused filtering and tagging to **GenStud
 - **Cycle active filter customer**: `Cmd/Ctrl + K`
   - Cycles through `All customers` → each customer in your list.
   - **Reverse direction**: hold **Shift** (`Cmd/Ctrl + Shift + K`).
+  - Shows a small toast with the newly selected filter.
   - Does not trigger while typing in inputs/textareas/contenteditable fields.
 
 - **Toggle Workspace bar**: `Cmd/Ctrl + Shift + O`
@@ -83,5 +85,6 @@ A Chrome extension that adds customer-focused filtering and tagging to **GenStud
 ## Notes & tips 📝
 
 - The extension is only active on `experience.adobe.com` URLs that include `genstudio`.
+- GS4PM may render content inside iframes whose own URL does not include `genstudio`; the extension still attaches in those frames if the top-level tab is GS4PM.
 - If you reload the extension, refresh the GS4PM tab to re‑initialize content scripts.
 - Tags are local to your browser profile (not synced between machines).
