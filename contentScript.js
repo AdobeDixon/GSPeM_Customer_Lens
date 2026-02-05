@@ -32,6 +32,8 @@ let tagging = false;
 let currentTagCustomer = null;
 let hoverHandler = null;
 let clickHandler = null;
+let pointerDownHandler = null;
+let pointerUpHandler = null;
 let escapeHandler = null;
 let bannerResizeHandler = null;
 let lastOutlinedContainer = null;
@@ -45,6 +47,7 @@ let dropdownWatchdogInterval = null;
 let dropdownRetryTimeouts = [];
 let dropdownItemObserver = null;
 let isTemporarilyIncreasingHeight = false; // Flag to prevent observer from resetting height during watchdog re-filtering
+let lastTagPointerUpAt = 0;
 
 const CUSTOMER_KEY = 'gs4pm_customers';
 const CURRENT_CUSTOMER_KEY = 'gs4pm_current_customer';
@@ -54,6 +57,67 @@ const TAGGING_BANNER_ID = 'gs4pm-tagging-banner';
 const OVERLAY_VISIBLE_KEY = 'gs4pm_overlay_visible';
 const OVERLAY_ID = 'gs4pm-workspace-bar';
 const OVERLAY_STYLE_ID = 'gs4pm-workspace-bar-style';
+
+// Hover highlight overlay (more reliable than element outline across shadow DOM / virtualization).
+const HOVER_HIGHLIGHT_ID = 'gs4pm-hover-highlight';
+let hoverHighlightEl = null;
+
+function ensureHoverHighlightEl() {
+  if (hoverHighlightEl && hoverHighlightEl.isConnected) return hoverHighlightEl;
+  const existing = document.getElementById(HOVER_HIGHLIGHT_ID);
+  if (existing) {
+    hoverHighlightEl = existing;
+    return hoverHighlightEl;
+  }
+  const el = document.createElement('div');
+  el.id = HOVER_HIGHLIGHT_ID;
+  el.style.position = 'fixed';
+  el.style.left = '0px';
+  el.style.top = '0px';
+  el.style.width = '0px';
+  el.style.height = '0px';
+  el.style.pointerEvents = 'none';
+  el.style.zIndex = '2147483646';
+  el.style.border = '2px dashed #00bcd4';
+  el.style.borderRadius = '10px';
+  el.style.boxShadow = '0 0 0 2px rgba(0, 188, 212, 0.18), 0 10px 22px rgba(0,0,0,0.18)';
+  el.style.display = 'none';
+  (document.body || document.documentElement).appendChild(el);
+  hoverHighlightEl = el;
+  return el;
+}
+
+function hideHoverHighlight() {
+  const el = ensureHoverHighlightEl();
+  el.style.display = 'none';
+  el.style.width = '0px';
+  el.style.height = '0px';
+}
+
+function positionHoverHighlight(target) {
+  if (!(target instanceof Element)) {
+    hideHoverHighlight();
+    return;
+  }
+  const rect = target.getBoundingClientRect();
+  if (!rect || rect.width < 2 || rect.height < 2) {
+    hideHoverHighlight();
+    return;
+  }
+  const el = ensureHoverHighlightEl();
+  // Small padding so the border doesn't overlap the component edge.
+  const pad = 2;
+  el.style.left = `${Math.max(0, rect.left - pad)}px`;
+  el.style.top = `${Math.max(0, rect.top - pad)}px`;
+  el.style.width = `${Math.max(0, rect.width + pad * 2)}px`;
+  el.style.height = `${Math.max(0, rect.height + pad * 2)}px`;
+  el.style.display = 'block';
+}
+
+function shouldRenderBadges() {
+  // Show badges while tagging, or whenever a specific filter is active.
+  return tagging || (currentFilterCustomer && currentFilterCustomer !== 'ALL');
+}
 
 console.log('[GS4PM Filter] contentScript loaded in frame:', window.location.href);
 console.log('[GS4PM Filter] Initializing on GS4PM page:', window.location.href);
@@ -144,6 +208,8 @@ function cycleActiveCustomerFilter(direction = 1) {
     chrome.storage.local.set({ [ACTIVE_FILTER_KEY]: next }, () => {
       const label = next === 'ALL' ? 'Filter: All customers' : `Filter: ${next}`;
       showFilterCycleToast(label);
+      // Ensure all frames apply immediately (Brands grid often lives in iframes).
+      try { sendBroadcastFromContent({ type: 'SET_FILTER', customer: next }); } catch {}
     });
   });
 }
@@ -490,8 +556,53 @@ function createDropdown({ label, placeholder, options, value, onChange }) {
 }
 
 function sendBroadcastFromContent(message) {
-  if (!chrome.runtime || !chrome.runtime.id) return;
-  chrome.runtime.sendMessage({ type: 'GS4PM_BROADCAST', message }, () => {});
+  if (!hasValidExtensionContext()) return;
+  try {
+    chrome.runtime.sendMessage({ type: 'GS4PM_BROADCAST', message }, () => {});
+  } catch (e) {
+    // Extension reloaded; page refresh required.
+    try { showFilterCycleToast('Extension updated: refresh page'); } catch {}
+  }
+}
+
+function hasValidExtensionContext() {
+  try {
+    return !!(chrome && chrome.runtime && chrome.runtime.id);
+  } catch {
+    return false;
+  }
+}
+
+function safeStorageGet(keys, cb) {
+  if (!hasValidExtensionContext()) {
+    cb?.({});
+    return;
+  }
+  try {
+    chrome.storage.local.get(keys, (data) => {
+      if (chrome.runtime && chrome.runtime.lastError) {
+        cb?.({});
+        return;
+      }
+      cb?.(data || {});
+    });
+  } catch (e) {
+    try { showFilterCycleToast('Extension updated: refresh page'); } catch {}
+    cb?.({});
+  }
+}
+
+function safeStorageSet(obj, cb) {
+  if (!hasValidExtensionContext()) {
+    cb?.();
+    return;
+  }
+  try {
+    chrome.storage.local.set(obj, () => cb?.());
+  } catch (e) {
+    try { showFilterCycleToast('Extension updated: refresh page'); } catch {}
+    cb?.();
+  }
 }
 
 function ensureWorkspaceBar() {
@@ -536,7 +647,9 @@ function ensureWorkspaceBar() {
     value: 'ALL',
     onChange: (val) => {
       const normalized = !val || val === 'ALL' ? 'ALL' : val;
-      chrome.storage.local.set({ [ACTIVE_FILTER_KEY]: normalized });
+      safeStorageSet({ [ACTIVE_FILTER_KEY]: normalized });
+      // Apply across all frames immediately (storage events can be flaky in nested iframes).
+      try { sendBroadcastFromContent({ type: 'SET_FILTER', customer: normalized }); } catch {}
     }
   });
 
@@ -556,11 +669,11 @@ function ensureWorkspaceBar() {
     value: null,
     onChange: (val) => {
       if (!val) {
-        chrome.storage.local.set({ [CURRENT_CUSTOMER_KEY]: '__ALL__' });
+        safeStorageSet({ [CURRENT_CUSTOMER_KEY]: '__ALL__' });
         return;
       }
-      chrome.storage.local.set({ [CURRENT_CUSTOMER_KEY]: val });
-      chrome.storage.local.get([TAGGING_ENABLED_KEY], (data) => {
+      safeStorageSet({ [CURRENT_CUSTOMER_KEY]: val });
+      safeStorageGet([TAGGING_ENABLED_KEY], (data) => {
         if (!data[TAGGING_ENABLED_KEY]) return;
         sendBroadcastFromContent({ type: 'STOP_TAGGING' });
         sendBroadcastFromContent({ type: 'START_TAGGING', customer: val });
@@ -591,10 +704,10 @@ function ensureWorkspaceBar() {
   const addCustomerFromBar = () => {
     const name = addInput.value.trim();
     if (!name) return;
-    chrome.storage.local.get([CUSTOMER_KEY], (data) => {
+    safeStorageGet([CUSTOMER_KEY], (data) => {
       const existing = Array.isArray(data[CUSTOMER_KEY]) ? data[CUSTOMER_KEY].filter(Boolean) : [];
       const updated = existing.includes(name) ? existing : [...existing, name];
-      chrome.storage.local.set(
+      safeStorageSet(
         {
           [CUSTOMER_KEY]: updated,
           [CURRENT_CUSTOMER_KEY]: name,
@@ -630,10 +743,10 @@ function ensureWorkspaceBar() {
   };
 
   const toggleTaggingFromBar = () => {
-    chrome.storage.local.get([TAGGING_ENABLED_KEY], (data) => {
+    safeStorageGet([TAGGING_ENABLED_KEY], (data) => {
       const enabled = !!data[TAGGING_ENABLED_KEY];
       if (enabled) {
-        chrome.storage.local.set({ [TAGGING_ENABLED_KEY]: false }, () => {
+        safeStorageSet({ [TAGGING_ENABLED_KEY]: false }, () => {
           updateToggleBtn(false);
           sendBroadcastFromContent({ type: 'STOP_TAGGING' });
         });
@@ -643,7 +756,7 @@ function ensureWorkspaceBar() {
       const selected = tagDd.getValue();
       if (!selected || selected === '__NONE__' || selected === 'ALL') return;
 
-      chrome.storage.local.set(
+      safeStorageSet(
         { [TAGGING_ENABLED_KEY]: true, [CURRENT_CUSTOMER_KEY]: selected },
         () => {
           updateToggleBtn(true);
@@ -659,7 +772,7 @@ function ensureWorkspaceBar() {
   hideBtn.type = 'button';
   hideBtn.className = 'gs4pm-btn';
   hideBtn.textContent = 'Hide';
-  hideBtn.addEventListener('click', () => chrome.storage.local.set({ [OVERLAY_VISIBLE_KEY]: false }));
+  hideBtn.addEventListener('click', () => safeStorageSet({ [OVERLAY_VISIBLE_KEY]: false }));
 
   const right = document.createElement('div');
   right.className = 'gs4pm-right';
@@ -710,7 +823,7 @@ function ensureWorkspaceBar() {
   (document.body || document.documentElement).appendChild(bar);
 
   const sync = () => {
-    chrome.storage.local.get(
+    safeStorageGet(
       [CUSTOMER_KEY, ACTIVE_FILTER_KEY, CURRENT_CUSTOMER_KEY, TAGGING_ENABLED_KEY, OVERLAY_VISIBLE_KEY],
       (data) => {
         const customers = Array.isArray(data[CUSTOMER_KEY]) ? data[CUSTOMER_KEY].filter(Boolean) : [];
@@ -750,18 +863,22 @@ function ensureWorkspaceBar() {
 
   sync();
 
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== 'local') return;
-    if (
-      changes[CUSTOMER_KEY] ||
-      changes[ACTIVE_FILTER_KEY] ||
-      changes[CURRENT_CUSTOMER_KEY] ||
-      changes[TAGGING_ENABLED_KEY] ||
-      changes[OVERLAY_VISIBLE_KEY]
-    ) {
-      sync();
-    }
-  });
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local') return;
+      if (
+        changes[CUSTOMER_KEY] ||
+        changes[ACTIVE_FILTER_KEY] ||
+        changes[CURRENT_CUSTOMER_KEY] ||
+        changes[TAGGING_ENABLED_KEY] ||
+        changes[OVERLAY_VISIBLE_KEY]
+      ) {
+        sync();
+      }
+    });
+  } catch (e) {
+    // ignore (extension context invalidated)
+  }
 }
 
 // Create the workspace bar in the top frame.
@@ -795,6 +912,55 @@ function isTemplatesPage() {
 // ===== Content/assets CSS filtering (no flicker on scroll) =====
 
 const ASSETS_FILTER_STYLE_ID = 'gs4pm-assets-filter-style';
+const BRAND_FILTER_STYLE_ID = 'gs4pm-brand-filter-style';
+const brandRemovedNodes = new Map(); // key -> { node, parent, nextSibling }
+
+function deepQuerySelector(selector, root = document) {
+  // Searches through document + any *open* shadow roots.
+  // (Does not pierce closed shadow roots.)
+  const tryQuery = (node) => {
+    if (!node || typeof node.querySelector !== 'function') return null;
+    try {
+      return node.querySelector(selector);
+    } catch (e) {
+      return null;
+    }
+  };
+
+  const first = tryQuery(root);
+  if (first) return first;
+
+  const visited = new Set();
+  const stack = [];
+
+  const enqueueShadowRoots = (node) => {
+    if (!node || typeof node.querySelectorAll !== 'function') return;
+    let all;
+    try {
+      all = node.querySelectorAll('*');
+    } catch (e) {
+      return;
+    }
+    all.forEach((el) => {
+      const sr = el && el.shadowRoot;
+      if (sr && !visited.has(sr)) {
+        visited.add(sr);
+        stack.push(sr);
+      }
+    });
+  };
+
+  enqueueShadowRoots(root);
+
+  while (stack.length) {
+    const sr = stack.pop();
+    const found = tryQuery(sr);
+    if (found) return found;
+    enqueueShadowRoots(sr);
+  }
+
+  return null;
+}
 
 function cssEscapeAttrValue(value) {
   // Safe for double-quoted CSS attribute selectors
@@ -953,6 +1119,153 @@ function updateTemplatesCssFilter(activeCustomer, tags) {
     document.head.appendChild(styleEl);
   }
   styleEl.textContent = css;
+}
+
+function isBrandLibraryPage() {
+  // Brands "library grid" view uses a stable root id + test id.
+  return getBrandLibraryGrid() !== null;
+}
+
+function updateBrandLibraryCssFilter(activeCustomer, tags) {
+  if (!isBrandLibraryPage()) return;
+
+  let styleEl = document.getElementById(BRAND_FILTER_STYLE_ID);
+  const debug = Boolean(window.__GS4PM_DEBUG_BRAND_FILTER);
+
+  const restoreRemovedBrandNodes = () => {
+    if (!brandRemovedNodes.size) return;
+    brandRemovedNodes.forEach((entry) => {
+      const { node, parent, nextSibling } = entry || {};
+      if (!node || !parent || !parent.isConnected) return;
+      try {
+        if (nextSibling && nextSibling.parentNode === parent) parent.insertBefore(node, nextSibling);
+        else parent.appendChild(node);
+      } catch (e) {
+        // ignore reinsertion failures
+      }
+    });
+    brandRemovedNodes.clear();
+  };
+
+  // Remove style when showing ALL
+  if (!activeCustomer || activeCustomer === 'ALL') {
+    if (styleEl) styleEl.remove();
+    // Restore any removed brand cards.
+    restoreRemovedBrandNodes();
+    // Also clear any inline hides.
+    const grid = getBrandLibraryGrid();
+    if (grid) {
+      Array.from(grid.querySelectorAll('div.library-list-item-container[data-key]')).forEach(c => {
+        if (c instanceof Element) c.style.removeProperty('display');
+      });
+    }
+    return;
+  }
+
+  // Brands filtering semantics: when a customer is selected, SHOW ONLY brands tagged to that customer.
+  // (This makes filtering obvious and avoids "no visible change" when most brands are untagged.)
+  const showKeys = new Set();
+
+  (tags || []).forEach(tag => {
+    if (!tag?.selector || !tag.customer) return;
+    if (tag.customer !== activeCustomer) return;
+    let key = extractAttrFromSelector(tag.selector, 'data-key');
+    if (key) {
+      showKeys.add(key);
+      return;
+    }
+    // Fallback: resolve selector in DOM and read closest brand container key.
+    try {
+      const matches = Array.from(document.querySelectorAll(tag.selector));
+      matches.forEach(el => {
+        if (!(el instanceof Element)) return;
+        const container = el.closest('div.library-list-item-container[data-key]');
+        const resolvedKey = container?.getAttribute('data-key');
+        if (resolvedKey) showKeys.add(resolvedKey);
+      });
+    } catch (e) {
+      // ignore invalid selectors
+    }
+  });
+
+  const showSelectors = Array.from(showKeys).map(k => `div.library-list-item-container[data-key="${cssEscapeAttrValue(k)}"]`);
+
+  // CSS: hide all brand cards by default, then show only matching keys.
+  // Scoped to #library-grid so we don't affect other lists.
+  const hideAllCss = `#library-grid[data-test-id="library-grid"] div.library-list-item-container[data-key]{display:none !important;}`;
+  const showCss = showSelectors.length ? `${showSelectors.join(',')}{display:revert !important;}` : '';
+  const css = hideAllCss + showCss;
+
+  if (!styleEl) {
+    styleEl = document.createElement('style');
+    styleEl.id = BRAND_FILTER_STYLE_ID;
+    document.head.appendChild(styleEl);
+  }
+  styleEl.textContent = css;
+
+  // Also apply DOM removal as a fallback against style isolation and to make filtering "obvious".
+  // We remove non-matching brand card containers from the grid, and re-insert them when filters change.
+  const grid = getBrandLibraryGrid();
+  if (grid) {
+    if (debug) {
+      console.log(
+        '[GS4PM Filter][Brand] applying',
+        activeCustomer,
+        'tags:',
+        Array.isArray(tags) ? tags.length : 0,
+        'current removed:',
+        brandRemovedNodes.size
+      );
+    }
+    // Restore any previously removed nodes so we can re-evaluate for the new active customer.
+    restoreRemovedBrandNodes();
+
+    const containers = Array.from(
+      grid.querySelectorAll('div.library-list-item-container[data-key]')
+    );
+    let removedCount = 0;
+    containers.forEach(container => {
+      const key = container.getAttribute('data-key');
+      if (!key) return;
+      if (showKeys.has(key)) {
+        // Ensure visible if this node was previously hidden by older logic.
+        container.style.removeProperty('display');
+        return;
+      }
+      // Remove from DOM (store for later restoration when filters change back).
+      const parent = container.parentNode;
+      if (parent) {
+        try {
+          if (!brandRemovedNodes.has(key)) {
+            brandRemovedNodes.set(key, {
+              node: container,
+              parent,
+              nextSibling: container.nextSibling,
+            });
+          }
+          parent.removeChild(container);
+          removedCount++;
+        } catch (e) {
+          // Fallback to inline hide if removal fails.
+          try {
+            container.style.setProperty('display', 'none', 'important');
+          } catch (e2) {}
+        }
+      }
+    });
+    if (debug) {
+      console.log(
+        '[GS4PM Filter][Brand] grid containers:',
+        containers.length,
+        'showKeys:',
+        showKeys.size,
+        'removed this pass:',
+        removedCount,
+        'stored removed:',
+        brandRemovedNodes.size
+      );
+    }
+  }
 }
 
 // ===== Selector helpers =====
@@ -1185,7 +1498,51 @@ function getDisplayContainer(el) {
 
 // ===== Badge helpers =====
 
+const BADGE_ATTR = 'data-gs4pm-badge';
+const BADGE_HOST_CLASS = 'gs4pm-badge-host';
+const BADGE_STYLE_ID = 'gs4pm-badge-style';
+
+function ensureBadgeStyles() {
+  if (document.getElementById(BADGE_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = BADGE_STYLE_ID;
+  style.textContent = `
+    /* High-specificity, !important to survive Spectrum/React styling */
+    div.library-list-item-container.${BADGE_HOST_CLASS}[${BADGE_ATTR}]::after{
+      content: attr(${BADGE_ATTR}) !important;
+      display: inline-block !important;
+      position: absolute !important;
+      top: 6px !important;
+      right: 6px !important;
+      z-index: 2147483646 !important;
+      background: rgba(0, 0, 0, 0.78) !important;
+      color: #fff !important;
+      padding: 3px 6px !important;
+      border-radius: 999px !important;
+      font-size: 11px !important;
+      line-height: 1.2 !important;
+      font-family: system-ui, -apple-system, Segoe UI, sans-serif !important;
+      font-weight: 650 !important;
+      letter-spacing: 0.01em !important;
+      pointer-events: none !important;
+      max-width: 76% !important;
+      overflow: hidden !important;
+      text-overflow: ellipsis !important;
+      white-space: nowrap !important;
+      box-shadow: 0 8px 18px rgba(0,0,0,0.25) !important;
+    }
+  `;
+  (document.head || document.documentElement).appendChild(style);
+}
+
+function shouldUseAttributeBadge(container) {
+  // Brand library tiles are often React-managed; injected children can be removed.
+  // Using an attribute + ::after is far more stable.
+  return container instanceof Element && container.matches('div.library-list-item-container');
+}
+
 function removeAllBadges(restorePosition = false) {
+  // Remove DOM badges
   Array.from(document.querySelectorAll('.gs4pm-tag-badge')).forEach(badge => {
     const parent = badge.parentElement;
     badge.remove();
@@ -1194,9 +1551,32 @@ function removeAllBadges(restorePosition = false) {
       delete parent.dataset.gs4pmOriginalPosition;
     }
   });
+
+  // Remove attribute-based badges (brands)
+  Array.from(document.querySelectorAll(`.${BADGE_HOST_CLASS}[${BADGE_ATTR}]`)).forEach(host => {
+    if (!(host instanceof Element)) return;
+    host.removeAttribute(BADGE_ATTR);
+    host.classList.remove(BADGE_HOST_CLASS);
+    if (restorePosition && host.dataset && host.dataset.gs4pmOriginalPosition === 'static') {
+      host.style.position = '';
+      delete host.dataset.gs4pmOriginalPosition;
+    }
+  });
 }
 
 function ensureBadgeContainer(container) {
+  // Brand library: use attribute badge to avoid React removing injected children.
+  if (shouldUseAttributeBadge(container)) {
+    ensureBadgeStyles();
+    const style = window.getComputedStyle(container);
+    if (style.position === 'static') {
+      container.dataset.gs4pmOriginalPosition = 'static';
+      container.style.position = 'relative';
+    }
+    container.classList.add(BADGE_HOST_CLASS);
+    return null;
+  }
+
   let badge = container.querySelector(':scope > .gs4pm-tag-badge');
   if (!badge) {
     const style = window.getComputedStyle(container);
@@ -1227,8 +1607,16 @@ function ensureBadgeContainer(container) {
 }
 
 function addBadge(container, customer) {
-  if (!tagging) return;
+  if (!shouldRenderBadges()) return;
   const badge = ensureBadgeContainer(container);
+  if (!badge && shouldUseAttributeBadge(container)) {
+    const existing = container.getAttribute(BADGE_ATTR) || '';
+    const names = existing ? existing.split(',').map(s => s.trim()).filter(Boolean) : [];
+    if (!names.includes(customer)) names.push(customer);
+    container.setAttribute(BADGE_ATTR, names.join(', '));
+    return;
+  }
+  if (!badge) return;
   let names = badge.dataset.customers ? badge.dataset.customers.split('|') : [];
   if (!names.includes(customer)) {
     names.push(customer);
@@ -1238,7 +1626,7 @@ function addBadge(container, customer) {
 }
 
 function refreshBadges() {
-  if (!tagging) return;
+  if (!shouldRenderBadges()) return;
   if (!cachedTags.length) {
     removeAllBadges(false);
     return;
@@ -1277,10 +1665,27 @@ function refreshBadges() {
     }
   });
 
+  // Remove attribute-based badges that are no longer present in computed map.
+  Array.from(document.querySelectorAll(`.${BADGE_HOST_CLASS}[${BADGE_ATTR}]`)).forEach(host => {
+    if (!(host instanceof Element)) return;
+    if (byContainer.has(host)) return;
+    host.removeAttribute(BADGE_ATTR);
+    host.classList.remove(BADGE_HOST_CLASS);
+    if (host.dataset && host.dataset.gs4pmOriginalPosition === 'static') {
+      host.style.position = '';
+      delete host.dataset.gs4pmOriginalPosition;
+    }
+  });
+
   // Update/create badges for all current containers.
   byContainer.forEach((customerSet, container) => {
-    const badge = ensureBadgeContainer(container);
     const names = Array.from(customerSet);
+    const badge = ensureBadgeContainer(container);
+    if (!badge && shouldUseAttributeBadge(container)) {
+      container.setAttribute(BADGE_ATTR, names.join(', '));
+      return;
+    }
+    if (!badge) return;
     badge.dataset.customers = names.join('|');
     badge.textContent = names.join(', ');
   });
@@ -1293,13 +1698,14 @@ function reorderVirtualizedGrid(visibleContainers, hiddenContainers) {
   
   // SAFETY: Filter out any dropdown elements that somehow got through
   const safeVisible = visibleContainers.filter(c => {
-    return c.querySelector('article') !== null && 
+    // Brand library cards don't use <article>; they use Spectrum Web Components (<sp-card...>).
+    return (c.querySelector('article') !== null || c.querySelector('[data-test-id^="library-grid-mosaic-card-"]') !== null) && 
            c.closest('[role="listbox"]') === null &&
            !c.className.includes('Popover');
   });
   
   const safeHidden = hiddenContainers.filter(c => {
-    return c.querySelector('article') !== null &&
+    return (c.querySelector('article') !== null || c.querySelector('[data-test-id^="library-grid-mosaic-card-"]') !== null) &&
            c.closest('[role="listbox"]') === null &&
            !c.className.includes('Popover');
   });
@@ -2261,7 +2667,7 @@ function applyFilter(activeCustomer) {
     if (isContentAssetsPage()) {
       updateAssetsCssFilter(activeCustomer, tags);
       cachedTags = tags;
-      if (tagging) refreshBadges();
+      if (shouldRenderBadges()) refreshBadges();
       return;
     }
 
@@ -2269,8 +2675,33 @@ function applyFilter(activeCustomer) {
     if (isTemplatesPage()) {
       updateTemplatesCssFilter(activeCustomer, tags);
       cachedTags = tags;
-      if (tagging) refreshBadges();
+      if (shouldRenderBadges()) refreshBadges();
       return;
+    }
+
+    // Brands library: CSS-driven hide/show to survive React virtualization.
+    if (isBrandLibraryPage()) {
+      updateBrandLibraryCssFilter(activeCustomer, tags);
+      cachedTags = tags;
+      if (shouldRenderBadges()) refreshBadges();
+      return;
+    }
+
+    // If a filter is active but the brand grid hasn't mounted yet, retry briefly.
+    // (Brand page is virtualized; the grid can appear after filter state is applied.)
+    if (activeCustomer && activeCustomer !== 'ALL') {
+      let tries = 0;
+      const tick = () => {
+        if (isBrandLibraryPage()) {
+          updateBrandLibraryCssFilter(activeCustomer, tags);
+          cachedTags = tags;
+          if (shouldRenderBadges()) refreshBadges();
+          return;
+        }
+        tries++;
+        if (tries < 25) setTimeout(tick, 200); // ~5s max
+      };
+      tick();
     }
 
     // Find all potential container types
@@ -2347,7 +2778,7 @@ function applyFilter(activeCustomer) {
     if (activeCustomer === 'ALL') {
       // Separate grid cards from dropdown wrappers
       const gridContainers = Array.from(allContainers).filter(c => 
-        c.querySelector('article') !== null
+        c.querySelector('article') !== null || c.querySelector('[data-test-id^="library-grid-mosaic-card-"]') !== null
       );
       const dropdownWrappers = Array.from(allContainers).filter(c => 
         c.getAttribute('role') === 'presentation' && c.querySelector('[role="option"]')
@@ -2366,7 +2797,7 @@ function applyFilter(activeCustomer) {
       
       console.log('[GS4PM Filter] Restored ALL:', gridContainers.length, 'cards and', dropdownWrappers.length, 'dropdown wrappers');
       
-      if (tagging) refreshBadges();
+      if (shouldRenderBadges()) refreshBadges();
       return;
     }
 
@@ -2404,7 +2835,7 @@ function applyFilter(activeCustomer) {
         if (tag.customer === activeCustomer) {
           // This item is tagged to the current customer - show it
           visibleContainers.add(container);
-          if (tagging) addBadge(container, tag.customer);
+          addBadge(container, tag.customer);
         } else {
           // This item is tagged to a different customer - hide it
           hiddenContainers.add(container);
@@ -3221,7 +3652,7 @@ function tagSelectorForCurrentCustomer(selector) {
   if (!selector) return;
 
   const pageKey = getPageKey();
-  chrome.storage.local.get([CURRENT_CUSTOMER_KEY, ACTIVE_FILTER_KEY, pageKey], data => {
+  safeStorageGet([CURRENT_CUSTOMER_KEY, ACTIVE_FILTER_KEY, pageKey], data => {
     let customer = data[CURRENT_CUSTOMER_KEY];
     const activeFilter = data[ACTIVE_FILTER_KEY];
     const tags = data[pageKey] || [];
@@ -3231,8 +3662,14 @@ function tagSelectorForCurrentCustomer(selector) {
       customer = activeFilter;
     }
 
+    // Fallback: if storage hasn't propagated into this frame yet, use the current tagging-session customer.
+    if ((!customer || customer === '__ALL__') && currentTagCustomer) {
+      customer = currentTagCustomer;
+    }
+
     if (!customer || customer === '__ALL__') {
       console.log('[GS4PM Filter] No current customer/filter selected; ignoring tag request.');
+      try { showFilterCycleToast('Tagging: select a customer first'); } catch (e) {}
       return;
     }
 
@@ -3242,26 +3679,157 @@ function tagSelectorForCurrentCustomer(selector) {
       // Toggle OFF: remove existing tag
       tags.splice(existingIndex, 1);
       console.log('[GS4PM Filter] Removed tag for customer', customer, selector);
+      try { showFilterCycleToast(`Untagged: ${customer}`); } catch (e) {}
     } else {
       // Toggle ON: add new tag
       tags.push({ selector, customer });
       console.log('[GS4PM Filter] Tagged selector for customer', customer, selector);
+      try { showFilterCycleToast(`Tagged: ${customer}`); } catch (e) {}
     }
 
     if (chrome.runtime && chrome.runtime.id) {
-      chrome.storage.local.set({ [pageKey]: tags }, () => {
+      safeStorageSet({ [pageKey]: tags }, () => {
         if (chrome.runtime.lastError) {
           console.warn('[GS4PM Filter] Could not save tags:', chrome.runtime.lastError.message);
+          try { showFilterCycleToast('Tagging failed: extension error'); } catch (e) {}
           return;
         }
         cachedTags = tags;
-        applyFilter(currentFilterCustomer || 'ALL');
-        if (tagging) refreshBadges();
+        // Re-read active filter in *this frame* to avoid cross-frame state drift.
+        safeStorageGet([ACTIVE_FILTER_KEY], (f) => {
+          const active = f[ACTIVE_FILTER_KEY] || 'ALL';
+          currentFilterCustomer = active;
+          applyFilter(active);
+          if (shouldRenderBadges()) refreshBadges();
+        });
       });
     } else {
       console.log('[GS4PM Filter] Cannot save tags - extension context unavailable');
+      try { showFilterCycleToast('Tagging failed: reload page'); } catch (e) {}
     }
   });
+}
+
+// ===== Brand library cards: table tagging + hover highlight target =====
+
+function getBrandLibraryGrid() {
+  return deepQuerySelector('#library-grid[data-test-id="library-grid"]');
+}
+
+function getBrandLibraryHoverTarget(dropTargetEl) {
+  if (!(dropTargetEl instanceof Element)) return null;
+  if (!dropTargetEl.matches('div[data-test-id^="library-drop-target"]')) return dropTargetEl;
+  // Brand library mosaic: outline the actual <sp-card...> host for a crisp highlight.
+  return dropTargetEl.querySelector('[data-test-id^="library-grid-mosaic-card-"]') || dropTargetEl;
+}
+
+function tagBrandLibraryAsTable() {
+  const grid = getBrandLibraryGrid();
+  if (!grid) return;
+
+  const containers = Array.from(
+    grid.querySelectorAll('div.library-list-item-container[data-type="library"][data-key]')
+  );
+  if (!containers.length) return;
+
+  // Mark the grid once (preserve any pre-existing role).
+  if (grid.dataset.gs4pmBrandOrigRole === undefined) {
+    grid.dataset.gs4pmBrandOrigRole = grid.getAttribute('role') || '';
+  }
+  grid.dataset.gs4pmTable = 'brand-library';
+  grid.setAttribute('role', 'table');
+
+  const parsePx = (v) => {
+    if (!v) return null;
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  // Determine columns/rows based on absolute-positioned top/left values.
+  const leftVals = containers
+    .map(c => parsePx(c.style.left))
+    .filter(v => typeof v === 'number')
+    .sort((a, b) => a - b);
+  const topVals = containers
+    .map(c => parsePx(c.style.top))
+    .filter(v => typeof v === 'number')
+    .sort((a, b) => a - b);
+
+  const dedupeNear = (vals, tol = 10) => {
+    const out = [];
+    vals.forEach(v => {
+      const last = out[out.length - 1];
+      if (last === undefined || Math.abs(v - last) > tol) out.push(v);
+    });
+    return out;
+  };
+
+  const cols = dedupeNear(leftVals);
+  const rows = dedupeNear(topVals);
+  const colCount = Math.max(1, cols.length || 1);
+  const rowCount = Math.max(1, rows.length || containers.length);
+  grid.setAttribute('aria-colcount', String(colCount));
+  grid.setAttribute('aria-rowcount', String(rowCount));
+
+  const nearestIndex1 = (anchors, value) => {
+    if (!anchors.length) return 1;
+    let bestI = 0;
+    let bestD = Infinity;
+    anchors.forEach((a, i) => {
+      const d = Math.abs(a - value);
+      if (d < bestD) {
+        bestD = d;
+        bestI = i;
+      }
+    });
+    return bestI + 1; // 1-based for ARIA
+  };
+
+  containers.forEach(container => {
+    const left = parsePx(container.style.left) ?? 0;
+    const top = parsePx(container.style.top) ?? 0;
+    const rowIndex = nearestIndex1(rows, top);
+    const colIndex = nearestIndex1(cols, left);
+
+    container.dataset.gs4pmTable = 'brand-library';
+    container.dataset.gs4pmRow = String(rowIndex);
+    container.dataset.gs4pmCol = String(colIndex);
+
+    // Assign the "cell" role to the container (least invasive; avoids re-wrapping).
+    if (container.dataset.gs4pmBrandOrigRole === undefined) {
+      container.dataset.gs4pmBrandOrigRole = container.getAttribute('role') || '';
+    }
+    container.setAttribute('role', 'cell');
+    container.setAttribute('aria-rowindex', String(rowIndex));
+    container.setAttribute('aria-colindex', String(colIndex));
+  });
+}
+
+function cleanupBrandLibraryTable() {
+  const grid = getBrandLibraryGrid();
+  if (grid && grid.dataset.gs4pmTable === 'brand-library') {
+    const orig = grid.dataset.gs4pmBrandOrigRole || '';
+    if (orig) grid.setAttribute('role', orig);
+    else grid.removeAttribute('role');
+    grid.removeAttribute('aria-colcount');
+    grid.removeAttribute('aria-rowcount');
+    delete grid.dataset.gs4pmTable;
+    delete grid.dataset.gs4pmBrandOrigRole;
+  }
+
+  document
+    .querySelectorAll('div.library-list-item-container[data-type="library"][data-key][data-gs4pm-table="brand-library"]')
+    .forEach(container => {
+      const orig = container.dataset.gs4pmBrandOrigRole || '';
+      if (orig) container.setAttribute('role', orig);
+      else container.removeAttribute('role');
+      container.removeAttribute('aria-rowindex');
+      container.removeAttribute('aria-colindex');
+      delete container.dataset.gs4pmTable;
+      delete container.dataset.gs4pmRow;
+      delete container.dataset.gs4pmCol;
+      delete container.dataset.gs4pmBrandOrigRole;
+    });
 }
 
 function startTagging(customer) {
@@ -3273,10 +3841,9 @@ function startTagging(customer) {
 
   const clearHoverOutline = () => {
     if (lastOutlinedContainer) {
-      lastOutlinedContainer.style.outline = '';
-      lastOutlinedContainer.style.outlineOffset = '';
       lastOutlinedContainer = null;
     }
+    hideHoverHighlight();
   };
 
   const hasCards = Boolean(
@@ -3295,7 +3862,7 @@ function startTagging(customer) {
       return getDisplayContainer(el) || el;
     }
     if (!hasCards && el.matches('div[data-test-id^="library-drop-target"]')) {
-      return el;
+      return getBrandLibraryHoverTarget(el);
     }
     return null;
   };
@@ -3309,8 +3876,13 @@ function startTagging(customer) {
       clearHoverOutline();
     }
     lastOutlinedContainer = target;
-    lastOutlinedContainer.style.outline = '2px dashed #00bcd4';
-    lastOutlinedContainer.style.outlineOffset = '2px';
+    positionHoverHighlight(lastOutlinedContainer);
+  };
+
+  const repositionHighlight = () => {
+    if (!tagging) return;
+    if (!lastOutlinedContainer || !(lastOutlinedContainer instanceof Element)) return;
+    positionHoverHighlight(lastOutlinedContainer);
   };
 
   escapeHandler = (e) => {
@@ -3336,26 +3908,22 @@ function startTagging(customer) {
     // Allow interacting with the workspace bar while tagging is enabled.
     if (e?.target instanceof Element && e.target.closest && e.target.closest(`#${OVERLAY_ID}`)) return;
     const el = findTaggableElement(e);
+    // Keep brand library table tagging up-to-date while hovering (virtualized DOM can recycle nodes).
+    tagBrandLibraryAsTable();
     applyHoverOutline(getHoverTarget(el));
   };
-
-  const mouseoutHandler = e => {
-    if (!lastOutlinedContainer) return;
-    const related = e.relatedTarget;
-    const targetIsWithinOutline = e.target instanceof Element
-      && (e.target === lastOutlinedContainer || lastOutlinedContainer.contains(e.target));
-    const relatedIsWithinOutline = related instanceof Element
-      && (related === lastOutlinedContainer || lastOutlinedContainer.contains(related));
-    if (targetIsWithinOutline && !relatedIsWithinOutline) {
-      clearHoverOutline();
-    }
-  };
-  startTagging.mouseoutHandler = mouseoutHandler;
 
   clickHandler = e => {
     if (!tagging) return;
     // Allow interacting with the workspace bar while tagging is enabled.
     if (e?.target instanceof Element && e.target.closest && e.target.closest(`#${OVERLAY_ID}`)) return;
+    // Some GS surfaces (notably brand library tiles) can suppress native clicks.
+    // We tag on pointerup and ignore the follow-up click to avoid double toggles.
+    if (Date.now() - lastTagPointerUpAt < 450) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
 
@@ -3369,10 +3937,67 @@ function startTagging(customer) {
     tagSelectorForCurrentCustomer(selector);
   };
 
-  document.addEventListener('mouseover', hoverHandler, true);
-  document.addEventListener('mouseout', mouseoutHandler, true);
+  // Pointer-based tagging: more reliable than `click` on draggable / virtualized tiles.
+  // We tag on pointerup with a small movement threshold to avoid tagging during drag.
+  const pointerState = {
+    active: false,
+    pointerId: null,
+    x: 0,
+    y: 0,
+  };
+
+  pointerDownHandler = (e) => {
+    if (!tagging) return;
+    if (e?.target instanceof Element && e.target.closest && e.target.closest(`#${OVERLAY_ID}`)) return;
+    // Only primary button / primary pointer.
+    if (typeof e.button === 'number' && e.button !== 0) return;
+    if (e.isPrimary === false) return;
+
+    pointerState.active = true;
+    pointerState.pointerId = e.pointerId;
+    pointerState.x = typeof e.clientX === 'number' ? e.clientX : 0;
+    pointerState.y = typeof e.clientY === 'number' ? e.clientY : 0;
+  };
+
+  pointerUpHandler = (e) => {
+    if (!tagging) return;
+    if (!pointerState.active) return;
+    if (pointerState.pointerId !== null && e.pointerId !== pointerState.pointerId) return;
+    if (e?.target instanceof Element && e.target.closest && e.target.closest(`#${OVERLAY_ID}`)) return;
+    if (typeof e.button === 'number' && e.button !== 0) return;
+    if (e.isPrimary === false) return;
+
+    const dx = (typeof e.clientX === 'number' ? e.clientX : 0) - pointerState.x;
+    const dy = (typeof e.clientY === 'number' ? e.clientY : 0) - pointerState.y;
+    pointerState.active = false;
+    pointerState.pointerId = null;
+
+    // Ignore if the pointer moved meaningfully (likely drag/scroll/selection).
+    if ((dx * dx + dy * dy) > (8 * 8)) return;
+
+    // Mirror click-to-tag behavior.
+    e.preventDefault();
+    e.stopPropagation();
+
+    const taggableEl = findTaggableElement(e);
+    if (!taggableEl) return;
+
+    clearHoverOutline();
+
+    const selector = getUniqueSelector(taggableEl);
+    console.log('[GS4PM Filter] PointerUp-to-tag selector', selector);
+    lastTagPointerUpAt = Date.now();
+    tagSelectorForCurrentCustomer(selector);
+  };
+
+  // Use pointermove so highlight is stable across shadow DOM retargeting.
+  document.addEventListener('pointermove', hoverHandler, true);
+  document.addEventListener('pointerdown', pointerDownHandler, true);
+  document.addEventListener('pointerup', pointerUpHandler, true);
   document.addEventListener('click', clickHandler, true);
   document.addEventListener('keydown', escapeHandler, true);
+  window.addEventListener('scroll', repositionHighlight, true);
+  window.addEventListener('resize', repositionHighlight, false);
   // Banner is rendered only in top frame, so only top frame needs resize handling.
   if (window.top === window) {
     if (bannerResizeHandler) {
@@ -3393,30 +4018,40 @@ function stopTagging() {
   tagging = false;
   currentTagCustomer = null;
 
-  document.removeEventListener('mouseover', hoverHandler, true);
+  document.removeEventListener('pointermove', hoverHandler, true);
+  if (pointerDownHandler) document.removeEventListener('pointerdown', pointerDownHandler, true);
+  if (pointerUpHandler) document.removeEventListener('pointerup', pointerUpHandler, true);
   document.removeEventListener('click', clickHandler, true);
   if (escapeHandler) {
     document.removeEventListener('keydown', escapeHandler, true);
   }
-  if (startTagging.mouseoutHandler) {
-    document.removeEventListener('mouseout', startTagging.mouseoutHandler, true);
-  }
   if (bannerResizeHandler) {
     window.removeEventListener('resize', bannerResizeHandler, false);
   }
+  window.removeEventListener('scroll', repositionHighlight, true);
+  window.removeEventListener('resize', repositionHighlight, false);
 
   hoverHandler = null;
   clickHandler = null;
+  pointerDownHandler = null;
+  pointerUpHandler = null;
   escapeHandler = null;
   bannerResizeHandler = null;
 
   if (lastOutlinedContainer) {
-    lastOutlinedContainer.style.outline = '';
-    lastOutlinedContainer.style.outlineOffset = '';
     lastOutlinedContainer = null;
   }
+  hideHoverHighlight();
 
-  removeAllBadges(true);
+  // Remove ARIA/data "table" tagging applied for brand library cards (only while tagging mode is active).
+  try { cleanupBrandLibraryTable(); } catch (e) {}
+
+  // Keep badges if a specific filter is active; otherwise clean up.
+  if (shouldRenderBadges()) {
+    refreshBadges();
+  } else {
+    removeAllBadges(true);
+  }
   removeTaggingBanner();
 
   console.log('[GS4PM Filter] Tagging mode OFF in frame', window.location.href);
@@ -3541,19 +4176,11 @@ if (chrome.runtime && chrome.runtime.id) {
     }
     
     currentFilterCustomer = customer;
-    if (chrome.runtime && chrome.runtime.id) {
-      chrome.storage.local.set({ [ACTIVE_FILTER_KEY]: customer }, () => {
-        if (chrome.runtime.lastError) {
-          console.warn('[GS4PM Filter] Could not save filter preference:', chrome.runtime.lastError.message);
-        }
-        applyFilter(customer);
-        if (tagging) refreshBadges();
-      });
-    } else {
-      console.log('[GS4PM Filter] Applying filter without saving preference - extension context unavailable');
+    // Persist (best effort) and apply immediately in this frame.
+    safeStorageSet({ [ACTIVE_FILTER_KEY]: customer }, () => {
       applyFilter(customer);
-      if (tagging) refreshBadges();
-    }
+      if (shouldRenderBadges()) refreshBadges();
+    });
   } else if (msg.type === 'TAG_LAST_RIGHT_CLICKED') {
     if (lastRightClickedSelector) {
       console.log('[GS4PM Filter] Tagging last right-clicked selector', lastRightClickedSelector, 'in frame', window.location.href);
@@ -3596,11 +4223,11 @@ if (chrome.runtime && chrome.runtime.id) {
 
 let dropdownCheckTimeout = null;
 let badgeRefreshScheduled = false;
+let brandFilterRefreshScheduled = false;
 
 function scheduleBadgeRefresh() {
-  if (!tagging) return;
+  if (!shouldRenderBadges()) return;
   if (!cachedTags.length) return;
-  if (!isContentAssetsPage() && !isTemplatesPage()) return;
   if (badgeRefreshScheduled) return;
   badgeRefreshScheduled = true;
   requestAnimationFrame(() => {
@@ -3609,8 +4236,24 @@ function scheduleBadgeRefresh() {
   });
 }
 
+function scheduleBrandFilterRefresh() {
+  if (brandFilterRefreshScheduled) return;
+  if (!isBrandLibraryPage()) return;
+  if (!currentFilterCustomer || currentFilterCustomer === 'ALL') return;
+  brandFilterRefreshScheduled = true;
+  requestAnimationFrame(() => {
+    brandFilterRefreshScheduled = false;
+    // Re-apply brand filtering to handle virtualization re-mounts.
+    updateBrandLibraryCssFilter(currentFilterCustomer, cachedTags);
+  });
+}
+
 const observer = new MutationObserver((mutations) => {
-  if (!cachedTags.length) return;
+  // Most of the time, we can skip work if there are no tags.
+  // But if a brand filter is active, we still need to remove/reinsert brand tiles as they mount.
+  const needsBrandFiltering =
+    currentFilterCustomer && currentFilterCustomer !== 'ALL' && isBrandLibraryPage();
+  if (!cachedTags.length && !needsBrandFiltering) return;
   
   let hasDropdownMutation = false;
   
@@ -3618,6 +4261,7 @@ const observer = new MutationObserver((mutations) => {
     if (m.type === 'attributes') {
       // Content/assets + templates reuse DOM nodes; re-apply badges when ids change.
       scheduleBadgeRefresh();
+      scheduleBrandFilterRefresh();
       return;
     }
     m.addedNodes.forEach(node => {
@@ -3657,6 +4301,15 @@ const observer = new MutationObserver((mutations) => {
       
       // For non-dropdown nodes, filter immediately
       applyFilterToNode(node);
+      // Brands grid virtualization: re-apply hide/show when brand tiles mount.
+      if (
+        node instanceof Element &&
+        (node.id === 'library-grid' ||
+         node.matches?.('#library-grid, div.library-list-item-container, div[data-test-id^="library-drop-target"]') ||
+         node.querySelector?.('#library-grid, div.library-list-item-container, div[data-test-id^="library-drop-target"]'))
+      ) {
+        scheduleBrandFilterRefresh();
+      }
     });
   });
 });
