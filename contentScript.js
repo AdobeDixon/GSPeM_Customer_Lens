@@ -35,6 +35,7 @@ let clickHandler = null;
 let pointerDownHandler = null;
 let pointerUpHandler = null;
 let escapeHandler = null;
+let repositionHighlight = null;
 let bannerResizeHandler = null;
 let lastOutlinedContainer = null;
 let lastRightClickedSelector = null;
@@ -115,8 +116,13 @@ function positionHoverHighlight(target) {
 }
 
 function shouldRenderBadges() {
-  // Show badges while tagging, or whenever a specific filter is active.
-  return tagging || (currentFilterCustomer && currentFilterCustomer !== 'ALL');
+  // User expectation: tags/badges are a tagging-mode affordance only.
+  return !!tagging;
+}
+
+function shouldRenderBrandLibraryCardLabels() {
+  // User expectation: labels are a tagging-mode affordance only.
+  return !!tagging;
 }
 
 console.log('[GS4PM Filter] contentScript loaded in frame:', window.location.href);
@@ -145,6 +151,36 @@ function getToastDocument() {
     return window.top && window.top.document ? window.top.document : document;
   } catch {
     return document;
+  }
+}
+
+function getTopDocumentSafe() {
+  try {
+    return window.top && window.top.document ? window.top.document : document;
+  } catch {
+    return document;
+  }
+}
+
+function isWorkspaceBarVisible() {
+  const doc = getTopDocumentSafe();
+  const overlay = doc.getElementById(OVERLAY_ID);
+  return !!(overlay && overlay.getAttribute('data-hidden') !== 'true');
+}
+
+function setWorkspaceBarVisible(visible) {
+  // Persist and broadcast so the top-frame can react even if storage events are flaky across iframes.
+  safeStorageSet({ [OVERLAY_VISIBLE_KEY]: !!visible });
+  try { sendBroadcastFromContent({ type: 'SET_OVERLAY_VISIBLE', visible: !!visible }); } catch {}
+
+  // Best-effort immediate DOM update (works if we're running in the same doc as the bar).
+  const doc = getTopDocumentSafe();
+  const overlay = doc.getElementById(OVERLAY_ID);
+  if (overlay) {
+    overlay.setAttribute('data-hidden', visible ? 'false' : 'true');
+    if (visible) {
+      try { overlay.focus(); } catch {}
+    }
   }
 }
 
@@ -229,6 +265,14 @@ document.addEventListener(
     // Cmd/Ctrl+K is commonly used by apps for command palettes; we intentionally override it on GS4PM.
     e.preventDefault();
     e.stopPropagation();
+
+    // First priority: ensure the workspace bar (popover menu) is visible.
+    // If it's already visible, Cmd/Ctrl+K cycles customers (Shift reverses direction).
+    if (!isWorkspaceBarVisible()) {
+      setWorkspaceBarVisible(true);
+      showFilterCycleToast('Menu: shown');
+      return;
+    }
 
     // Shift reverses direction (nice for power-users).
     cycleActiveCustomerFilter(e.shiftKey ? -1 : 1);
@@ -891,6 +935,15 @@ setTimeout(() => {
   }
 }, 0);
 
+// Brand library card badges run in whatever frame owns the grid.
+setTimeout(() => {
+  try {
+    initBrandLibraryCardLabels();
+  } catch (e) {
+    // optional enhancement
+  }
+}, 0);
+
 function getPageKey() {
   // Use a host-wide key so tags apply across GS4PM sections (personas, products, dropdowns, etc.)
   return `gs4pm_tags::${location.host}`;
@@ -973,6 +1026,28 @@ function extractAttrFromSelector(selector, attrName) {
   const re = new RegExp(`\\[\\s*${attrName}\\s*=\\s*["']([^"']+)["']\\s*\\]`);
   const match = selector.match(re);
   return match ? match[1] : null;
+}
+
+function inferListboxTotalOptionCount(listboxEl) {
+  if (!(listboxEl instanceof Element)) return null;
+
+  // Prefer container-level hints when present.
+  const fromListboxSetSize = parseInt(listboxEl.getAttribute('aria-setsize') || '', 10);
+  if (Number.isFinite(fromListboxSetSize) && fromListboxSetSize > 0) return fromListboxSetSize;
+
+  const fromRowCount = parseInt(listboxEl.getAttribute('aria-rowcount') || '', 10);
+  if (Number.isFinite(fromRowCount) && fromRowCount > 0) return fromRowCount;
+
+  // Fall back to option-level hints.
+  const options = Array.from(listboxEl.querySelectorAll('[role="option"]'));
+  let maxSetSize = null;
+  for (const opt of options) {
+    const v = parseInt(opt.getAttribute('aria-setsize') || '', 10);
+    if (Number.isFinite(v) && v > 0) {
+      maxSetSize = Math.max(maxSetSize || 0, v);
+    }
+  }
+  return maxSetSize;
 }
 
 function updateAssetsCssFilter(activeCustomer, tags) {
@@ -1155,9 +1230,13 @@ function updateBrandLibraryCssFilter(activeCustomer, tags) {
     // Also clear any inline hides.
     const grid = getBrandLibraryGrid();
     if (grid) {
-      Array.from(grid.querySelectorAll('div.library-list-item-container[data-key]')).forEach(c => {
-        if (c instanceof Element) c.style.removeProperty('display');
+      const containers = Array.from(grid.querySelectorAll('div.library-list-item-container[data-key]'));
+      containers.forEach(c => {
+        if (!(c instanceof Element)) return;
+        c.style.removeProperty('display');
       });
+      // Restore original virtualized positions (prevents gaps after filtering).
+      try { restoreVirtualizedGrid(containers); } catch (e) {}
     }
     return;
   }
@@ -1188,23 +1267,17 @@ function updateBrandLibraryCssFilter(activeCustomer, tags) {
     }
   });
 
-  const showSelectors = Array.from(showKeys).map(k => `div.library-list-item-container[data-key="${cssEscapeAttrValue(k)}"]`);
-
-  // CSS: hide all brand cards by default, then show only matching keys.
-  // Scoped to #library-grid so we don't affect other lists.
-  const hideAllCss = `#library-grid[data-test-id="library-grid"] div.library-list-item-container[data-key]{display:none !important;}`;
-  const showCss = showSelectors.length ? `${showSelectors.join(',')}{display:revert !important;}` : '';
-  const css = hideAllCss + showCss;
-
-  if (!styleEl) {
-    styleEl = document.createElement('style');
-    styleEl.id = BRAND_FILTER_STYLE_ID;
-    document.head.appendChild(styleEl);
+  // IMPORTANT:
+  // Brand library mosaic is virtualized + absolutely positioned. Hiding/removing nodes can leave
+  // layout gaps (cards keep old left/top). Instead, we reflow visible cards to the top-left using
+  // `reorderVirtualizedGrid` and push hidden cards off-screen.
+  if (styleEl) {
+    // Remove any legacy CSS hide/show rules that can interfere with measuring positions.
+    styleEl.remove();
+    styleEl = null;
   }
-  styleEl.textContent = css;
 
-  // Also apply DOM removal as a fallback against style isolation and to make filtering "obvious".
-  // We remove non-matching brand card containers from the grid, and re-insert them when filters change.
+  // If we previously removed nodes with older logic, restore them so we can reposition.
   const grid = getBrandLibraryGrid();
   if (grid) {
     if (debug) {
@@ -1223,46 +1296,51 @@ function updateBrandLibraryCssFilter(activeCustomer, tags) {
     const containers = Array.from(
       grid.querySelectorAll('div.library-list-item-container[data-key]')
     );
-    let removedCount = 0;
-    containers.forEach(container => {
+
+    const visible = [];
+    const hidden = [];
+    containers.forEach((container) => {
+      if (!(container instanceof Element)) return;
+      // Clear any legacy inline display hides so we can measure/reposition.
+      try { container.style.removeProperty('display'); } catch (e) {}
+
       const key = container.getAttribute('data-key');
-      if (!key) return;
-      if (showKeys.has(key)) {
-        // Ensure visible if this node was previously hidden by older logic.
-        container.style.removeProperty('display');
-        return;
-      }
-      // Remove from DOM (store for later restoration when filters change back).
-      const parent = container.parentNode;
-      if (parent) {
-        try {
-          if (!brandRemovedNodes.has(key)) {
-            brandRemovedNodes.set(key, {
-              node: container,
-              parent,
-              nextSibling: container.nextSibling,
-            });
-          }
-          parent.removeChild(container);
-          removedCount++;
-        } catch (e) {
-          // Fallback to inline hide if removal fails.
-          try {
-            container.style.setProperty('display', 'none', 'important');
-          } catch (e2) {}
-        }
-      }
+      if (key && showKeys.has(key)) visible.push(container);
+      else hidden.push(container);
     });
+
+    if (visible.length === 0) {
+      // Hide all (no matches) without leaving gaps.
+      const parent = containers[0]?.parentElement || null;
+      hidden.forEach((container) => {
+        if (!(container instanceof Element)) return;
+        if (!container.dataset.gs4pmOrigLeft) {
+          container.dataset.gs4pmOrigLeft = container.style.left;
+          container.dataset.gs4pmOrigTop = container.style.top;
+        }
+        container.style.left = '-9999px';
+        container.style.top = '-9999px';
+        container.dataset.gs4pmHidden = 'true';
+      });
+      if (parent) {
+        if (!parent.dataset.gs4pmOrigHeight) parent.dataset.gs4pmOrigHeight = parent.style.height;
+        parent.style.height = '0px';
+      }
+      if (debug) console.log('[GS4PM Filter][Brand] no matches; hid all brand tiles');
+    } else {
+      try { reorderVirtualizedGrid(visible, hidden); } catch (e) {}
+    }
+
     if (debug) {
       console.log(
         '[GS4PM Filter][Brand] grid containers:',
         containers.length,
         'showKeys:',
         showKeys.size,
-        'removed this pass:',
-        removedCount,
-        'stored removed:',
-        brandRemovedNodes.size
+        'visible:',
+        visible.length,
+        'hidden:',
+        hidden.length
       );
     }
   }
@@ -1731,6 +1809,10 @@ function reorderVirtualizedGrid(visibleContainers, hiddenContainers) {
   
   // Sort by top then left to find grid pattern
   positions.sort((a, b) => a.top - b.top || a.left - b.left);
+
+  // Preserve the grid's natural inset (this grid often starts at ~24px, not 0).
+  const originLeft = positions[0].left || 0;
+  const originTop = positions[0].top || 0;
   
   // Find column width (smallest horizontal gap between items in same row)
   const firstRowItems = positions.filter(p => Math.abs(p.top - positions[0].top) < 10);
@@ -1755,8 +1837,8 @@ function reorderVirtualizedGrid(visibleContainers, hiddenContainers) {
   safeVisible.forEach((container, index) => {
     const col = index % columnsPerRow;
     const row = Math.floor(index / columnsPerRow);
-    const newLeft = col * columnWidth;
-    const newTop = row * rowHeight;
+    const newLeft = originLeft + col * columnWidth;
+    const newTop = originTop + row * rowHeight;
     
     // Store original position if not already stored
     if (!container.dataset.gs4pmOrigLeft) {
@@ -1767,6 +1849,8 @@ function reorderVirtualizedGrid(visibleContainers, hiddenContainers) {
     container.style.left = newLeft + 'px';
     container.style.top = newTop + 'px';
     container.style.display = '';
+    // If this container was previously hidden, clear hidden marker.
+    delete container.dataset.gs4pmHidden;
   });
   
   // Move hidden containers off-screen
@@ -2397,48 +2481,8 @@ function reorderVirtualizedDropdown(visibleWrappers, hiddenWrappers) {
         wrapper.querySelector('[role="option"]') && wrapper.style.position === 'absolute' && wrapper.style.top !== '-9999px'
       );
       
-      // Check if we have fewer items than expected (React might not have rendered all items)
-      const expectedCounts = { 'Ladbrokes': 4, 'WKND': 7 };
-      const expectedCount = expectedCounts[currentFilterCustomer];
-      if (expectedCount && freshWrappers.length < expectedCount) {
-        console.log('[GS4PM Filter] ⚠️ Watchdog: Only', freshWrappers.length, 'items visible, expected', expectedCount, '- container too small!');
-        // Container is too small - React hasn't rendered all expected items
-        // Increase height to force React to render all items, then re-filter
-        const listboxContainer = parent.closest('[role="listbox"]') || parent.parentElement;
-        if (listboxContainer && document.body.contains(listboxContainer)) {
-          console.log('[GS4PM Filter] 🔄 Increasing height to force React to render all items...');
-          // Set flag to prevent observer from resetting height
-          isTemporarilyIncreasingHeight = true;
-          
-          // Temporarily increase height to force React to render all items again
-          const tempHeight = 352; // Full height for all 11 items
-          parent.style.setProperty('height', tempHeight + 'px', 'important');
-          parent.style.setProperty('max-height', tempHeight + 'px', 'important');
-          if (listbox) {
-            listbox.style.setProperty('height', tempHeight + 'px', 'important');
-            listbox.style.setProperty('max-height', tempHeight + 'px', 'important');
-          }
-          if (popover) {
-            popover.style.setProperty('height', tempHeight + 'px', 'important');
-            popover.style.setProperty('max-height', tempHeight + 'px', 'important');
-          }
-          
-          // Wait a bit for React to render, then re-filter
-          setTimeout(() => {
-            if (document.body.contains(listboxContainer)) {
-              // Re-query and re-filter
-              applyFilterToNode(listboxContainer);
-              // Reset flag after re-filtering starts (it will set new targetDropdownHeight)
-              setTimeout(() => {
-                isTemporarilyIncreasingHeight = false;
-              }, 200);
-            } else {
-              isTemporarilyIncreasingHeight = false;
-            }
-          }, 100);
-        }
-        needsFix = true;
-      } else if (freshWrappers.length > 0) {
+      // Generic watchdog: rely on clipping/virtualization checks below (no hardcoded demo counts).
+      if (freshWrappers.length > 0) {
         const lastItem = freshWrappers[freshWrappers.length - 1];
         
         // Check if last item still exists in DOM (React might remove it)
@@ -2969,123 +3013,6 @@ function applyFilterToNode(node) {
     // Mark as filtering
     filteringListboxes.add(listboxContainer);
     
-    // IMMEDIATE FILTERING: Filter items synchronously BEFORE React renders them
-    // This prevents any flash of wrong items
-    if (currentFilterCustomer !== 'ALL') {
-      const expectedKeys = {
-        'Ladbrokes': ['Rc691c7ec72417932481c122f7', 'Rc691c7ecc770c9e030959527a', 'Rc691dcb1f770c9e0309817a12', 'Rc691c7ed02417932481c12568'],
-        'WKND': ['Rc677bf0a47dc0b924845c6e17', 'Rc677bf1098c4eb7177f7882ca', 'Rc677bf2057dc0b924845c6e2c', 'Rc677bf30eaf536d72a095c1bd', 'Rc677bf4bbaf536d72a095c1ce', 'Rc677bf1948c4eb7177f7882f8', 'Rc677bf2668c4eb7177f788332']
-      };
-      const expectedKeysForCustomer = expectedKeys[currentFilterCustomer] || [];
-      
-      // Filter items immediately and synchronously
-      const immediateFilter = () => {
-        const allWrappers = Array.from(listboxContainer.querySelectorAll('[role="presentation"]')).filter(wrapper => 
-          wrapper.querySelector('[role="option"]') && wrapper.style.position === 'absolute'
-        );
-        allWrappers.forEach(wrapper => {
-          const option = wrapper.querySelector('[role="option"]');
-          if (option) {
-            const optionKey = option.getAttribute('data-key');
-            if (optionKey && !expectedKeysForCustomer.includes(optionKey)) {
-              wrapper.style.top = '-9999px';
-              wrapper.style.left = '-9999px';
-              wrapper.style.visibility = 'hidden';
-              wrapper.style.opacity = '0';
-            }
-          }
-        });
-      };
-      
-      // Run immediately
-      immediateFilter();
-      
-      // Also run in next frame to catch items added in the same frame
-      requestAnimationFrame(() => {
-        immediateFilter();
-        requestAnimationFrame(() => {
-          immediateFilter();
-        });
-      });
-      
-      // IMMEDIATE HEIGHT & SORTING: Set filtered height and sort items immediately
-      const parent = listboxContainer.querySelector('[role="presentation"]');
-      if (parent) {
-        const expectedCounts = { 'Ladbrokes': 4, 'WKND': 7 };
-        const expectedCount = expectedCounts[currentFilterCustomer] || 11;
-        const itemHeight = 32;
-        const baseOffset = currentFilterCustomer === 'Ladbrokes' ? 36 : 4;
-        const heightBuffer = 24;
-        const filteredHeight = baseOffset + (expectedCount * itemHeight) + heightBuffer;
-        
-        // Set filtered height immediately to prevent gaps
-        parent.style.setProperty('height', filteredHeight + 'px', 'important');
-        parent.style.setProperty('max-height', filteredHeight + 'px', 'important');
-        parent.style.setProperty('overflow', 'hidden', 'important');
-        
-        const listbox = listboxContainer;
-        if (listbox) {
-          listbox.style.setProperty('height', filteredHeight + 'px', 'important');
-          listbox.style.setProperty('max-height', filteredHeight + 'px', 'important');
-        }
-        
-        const outerContainer = listboxContainer.closest('[role="presentation"]');
-        if (outerContainer && outerContainer !== parent) {
-          outerContainer.style.setProperty('height', filteredHeight + 'px', 'important');
-          outerContainer.style.setProperty('max-height', filteredHeight + 'px', 'important');
-        }
-        
-        const popover = listboxContainer.closest('[data-testid="popover"]') || 
-                       listboxContainer.closest('.spectrum-Popover') ||
-                       listboxContainer.closest('[role="presentation"][class*="Popover"]');
-        if (popover) {
-          popover.style.setProperty('height', filteredHeight + 'px', 'important');
-          popover.style.setProperty('max-height', filteredHeight + 'px', 'important');
-          popover.style.setProperty('min-height', filteredHeight + 'px', 'important');
-        }
-        
-        // Sort and reposition visible items immediately
-        const allWrappers = Array.from(listboxContainer.querySelectorAll('[role="presentation"]')).filter(wrapper => 
-          wrapper.querySelector('[role="option"]') && wrapper.style.position === 'absolute'
-        );
-        
-        const visibleWrappers = allWrappers.filter(wrapper => {
-          const option = wrapper.querySelector('[role="option"]');
-          if (option) {
-            const optionKey = option.getAttribute('data-key');
-            return optionKey && expectedKeysForCustomer.includes(optionKey);
-          }
-          return false;
-        });
-        
-        if (visibleWrappers.length > 0) {
-          // Store original positions
-          visibleWrappers.forEach(wrapper => {
-            if (!wrapper.dataset.gs4pmOrigTop) {
-              wrapper.dataset.gs4pmOrigTop = wrapper.style.top || '0px';
-            }
-          });
-          
-          // Sort by original position
-          const sortedVisible = visibleWrappers.sort((a, b) => {
-            const aTop = parseInt(a.dataset.gs4pmOrigTop) || 0;
-            const bTop = parseInt(b.dataset.gs4pmOrigTop) || 0;
-            return aTop - bTop;
-          });
-          
-          // Reposition items immediately
-          sortedVisible.forEach((wrapper, index) => {
-            const newTop = (index * itemHeight) + baseOffset;
-            wrapper.style.top = newTop + 'px';
-            wrapper.style.display = '';
-            wrapper.style.visibility = 'visible';
-            wrapper.style.opacity = '1';
-          });
-          
-        }
-      }
-    }
-    
     // Cancel any existing retry timeouts from previous dropdown opens
     dropdownRetryTimeouts.forEach(timeoutId => clearTimeout(timeoutId));
     dropdownRetryTimeouts = [];
@@ -3122,360 +3049,15 @@ function applyFilterToNode(node) {
       if (attempt === 1) {
         filteringListboxes.add(listboxContainer);
       }
-      
-      // CRITICAL FIX: Set container height to show ALL items FIRST
-      // This forces React to render all items (virtualization only renders visible items)
-      const parent = listboxContainer.querySelector('[role="presentation"]');
-      let immediateFilterObserver = null; // Declare outside if block for cleanup
-      let immediateFilterInterval = null; // Declare outside if block for cleanup
-      
-      if (parent && attempt === 1) {
-        // Check if filtered height is already set (from immediate filtering)
-        const currentHeight = parent.style.height;
-        const expectedCounts = { 'Ladbrokes': 4, 'WKND': 7 };
-        const expectedCount = expectedCounts[currentFilterCustomer] || 11;
-        const itemHeight = 32;
-        const baseOffset = currentFilterCustomer === 'Ladbrokes' ? 36 : 4;
-        const heightBuffer = 24;
-        const filteredHeight = baseOffset + (expectedCount * itemHeight) + heightBuffer;
-        const fullHeight = 11 * 32; // All personas
-        
-        // If filtered height is already set, temporarily expand to force React to render all items
-        // Then immediately shrink back to filtered height (happens synchronously)
-        if (currentHeight && currentHeight.includes(filteredHeight.toString())) {
-          // Temporarily expand to full height synchronously
-          parent.style.setProperty('height', fullHeight + 'px', 'important');
-          parent.style.setProperty('max-height', fullHeight + 'px', 'important');
-          
-          const listbox = listboxContainer;
-          if (listbox) {
-            listbox.style.setProperty('height', fullHeight + 'px', 'important');
-            listbox.style.setProperty('max-height', fullHeight + 'px', 'important');
-          }
-          
-          const outerContainer = listboxContainer.closest('[role="presentation"]');
-          if (outerContainer && outerContainer !== parent) {
-            outerContainer.style.setProperty('height', fullHeight + 'px', 'important');
-            outerContainer.style.setProperty('max-height', fullHeight + 'px', 'important');
-          }
-          
-          const popover = listboxContainer.closest('[data-testid="popover"]') || 
-                         listboxContainer.closest('.spectrum-Popover') ||
-                         listboxContainer.closest('[role="presentation"][class*="Popover"]');
-          if (popover) {
-            if (!popover.dataset.gs4pmOrigHeight) {
-              popover.dataset.gs4pmOrigHeight = popover.style.height || '';
-              popover.dataset.gs4pmOrigMaxHeight = popover.style.maxHeight || '';
-            }
-            popover.style.setProperty('height', fullHeight + 'px', 'important');
-            popover.style.setProperty('max-height', fullHeight + 'px', 'important');
-            popover.style.setProperty('min-height', fullHeight + 'px', 'important');
-          }
-          
-          console.log('[GS4PM Filter] 🔧 Temporarily expanded to', fullHeight, 'px to force React render (will shrink back to', filteredHeight, 'px)');
-          
-          // Shrink back to filtered height after React renders (use requestAnimationFrame to run before paint)
-          requestAnimationFrame(() => {
-            // Check if we have all items rendered before shrinking
-            const checkWrappers = Array.from(listboxContainer.querySelectorAll('[role="presentation"]')).filter(wrapper => 
-              wrapper.querySelector('[role="option"]') && wrapper.style.position === 'absolute'
-            );
-            
-            if (checkWrappers.length >= 11) {
-              // All items rendered, shrink back to filtered height
-              parent.style.setProperty('height', filteredHeight + 'px', 'important');
-              parent.style.setProperty('max-height', filteredHeight + 'px', 'important');
-              if (listbox) {
-                listbox.style.setProperty('height', filteredHeight + 'px', 'important');
-                listbox.style.setProperty('max-height', filteredHeight + 'px', 'important');
-              }
-              if (outerContainer) {
-                outerContainer.style.setProperty('height', filteredHeight + 'px', 'important');
-                outerContainer.style.setProperty('max-height', filteredHeight + 'px', 'important');
-              }
-              if (popover) {
-                popover.style.setProperty('height', filteredHeight + 'px', 'important');
-                popover.style.setProperty('max-height', filteredHeight + 'px', 'important');
-                popover.style.setProperty('min-height', filteredHeight + 'px', 'important');
-              }
-              console.log('[GS4PM Filter] ✅ Shrunk back to filtered height', filteredHeight + 'px');
-            } else {
-              // Not all items rendered yet, wait another frame
-              requestAnimationFrame(() => {
-                parent.style.setProperty('height', filteredHeight + 'px', 'important');
-                parent.style.setProperty('max-height', filteredHeight + 'px', 'important');
-                if (listbox) {
-                  listbox.style.setProperty('height', filteredHeight + 'px', 'important');
-                  listbox.style.setProperty('max-height', filteredHeight + 'px', 'important');
-                }
-                if (outerContainer) {
-                  outerContainer.style.setProperty('height', filteredHeight + 'px', 'important');
-                  outerContainer.style.setProperty('max-height', filteredHeight + 'px', 'important');
-                }
-                if (popover) {
-                  popover.style.setProperty('height', filteredHeight + 'px', 'important');
-                  popover.style.setProperty('max-height', filteredHeight + 'px', 'important');
-                  popover.style.setProperty('min-height', filteredHeight + 'px', 'important');
-                }
-              });
-            }
-          });
-        } else {
-          // Filtered height not set yet, set full height normally
-          parent.style.setProperty('height', fullHeight + 'px', 'important');
-          parent.style.setProperty('max-height', fullHeight + 'px', 'important');
-          parent.style.setProperty('overflow', 'hidden', 'important');
-          
-          const listbox = listboxContainer;
-          if (listbox) {
-            listbox.style.setProperty('height', fullHeight + 'px', 'important');
-            listbox.style.setProperty('max-height', fullHeight + 'px', 'important');
-          }
-          
-          const outerContainer = listboxContainer.closest('[role="presentation"]');
-          if (outerContainer && outerContainer !== parent) {
-            outerContainer.style.setProperty('height', fullHeight + 'px', 'important');
-            outerContainer.style.setProperty('max-height', fullHeight + 'px', 'important');
-          }
-          
-          const popover = listboxContainer.closest('[data-testid="popover"]') || 
-                         listboxContainer.closest('.spectrum-Popover') ||
-                         listboxContainer.closest('[role="presentation"][class*="Popover"]');
-          if (popover) {
-            if (!popover.dataset.gs4pmOrigHeight) {
-              popover.dataset.gs4pmOrigHeight = popover.style.height || '';
-              popover.dataset.gs4pmOrigMaxHeight = popover.style.maxHeight || '';
-            }
-            popover.style.setProperty('height', fullHeight + 'px', 'important');
-            popover.style.setProperty('max-height', fullHeight + 'px', 'important');
-            popover.style.setProperty('min-height', fullHeight + 'px', 'important');
-          }
-        }
-        
-        // IMMEDIATE FILTERING: Hide items immediately to prevent flash
-        // First, hide any existing items that don't match the filter
-        const expectedKeys = {
-          'Ladbrokes': ['Rc691c7ec72417932481c122f7', 'Rc691c7ecc770c9e030959527a', 'Rc691dcb1f770c9e0309817a12', 'Rc691c7ed02417932481c12568'], // Darts, Football, Live Casino, Responsible Returner
-          'WKND': ['Rc677bf0a47dc0b924845c6e17', 'Rc677bf1098c4eb7177f7882ca', 'Rc677bf2057dc0b924845c6e2c', 'Rc677bf30eaf536d72a095c1bd', 'Rc677bf4bbaf536d72a095c1ce', 'Rc677bf1948c4eb7177f7882f8', 'Rc677bf2668c4eb7177f788332'] // All WKND personas
-        };
-        const expectedKeysForCustomer = expectedKeys[currentFilterCustomer] || [];
-        
-        // SIMPLE APPROACH: Just hide items that don't match as they're added
-        // Don't watch style changes to avoid infinite loops
-        if (currentFilterCustomer !== 'ALL') {
-          // Hide existing items that don't match
-          const existingWrappers = Array.from(listboxContainer.querySelectorAll('[role="presentation"]')).filter(wrapper => 
-            wrapper.querySelector('[role="option"]') && wrapper.style.position === 'absolute'
-          );
-          existingWrappers.forEach(wrapper => {
-            const option = wrapper.querySelector('[role="option"]');
-            if (option) {
-              const optionKey = option.getAttribute('data-key');
-              if (optionKey && !expectedKeysForCustomer.includes(optionKey)) {
-                wrapper.style.top = '-9999px';
-                wrapper.style.left = '-9999px';
-                wrapper.style.visibility = 'hidden';
-                wrapper.style.opacity = '0';
-              }
-            }
-          });
-        }
-        
-        // AGGRESSIVE SYNCHRONOUS OBSERVER: Filter ALL items immediately when any are added
-        immediateFilterObserver = new MutationObserver((mutations) => {
-          if (currentFilterCustomer !== 'ALL') {
-            // Filter ALL items synchronously, not just new ones
-            const allWrappers = Array.from(listboxContainer.querySelectorAll('[role="presentation"]')).filter(wrapper => 
-              wrapper.querySelector('[role="option"]') && wrapper.style.position === 'absolute'
-            );
-            allWrappers.forEach(wrapper => {
-              const option = wrapper.querySelector('[role="option"]');
-              if (option) {
-                const optionKey = option.getAttribute('data-key');
-                if (optionKey && !expectedKeysForCustomer.includes(optionKey)) {
-                  // Hide synchronously - no delay
-                  wrapper.style.top = '-9999px';
-                  wrapper.style.left = '-9999px';
-                  wrapper.style.visibility = 'hidden';
-                  wrapper.style.opacity = '0';
-                }
-              }
-            });
-          }
-        });
-        
-        // Watch for child additions with immediate callback
-        immediateFilterObserver.observe(listboxContainer, { 
-          childList: true, 
-          subtree: true,
-          // Use flush: 'sync' if available, otherwise rely on synchronous callback
-        });
-        
-        // Also filter immediately after setting height
-        if (currentFilterCustomer !== 'ALL') {
-          const allWrappers = Array.from(listboxContainer.querySelectorAll('[role="presentation"]')).filter(wrapper => 
-            wrapper.querySelector('[role="option"]') && wrapper.style.position === 'absolute'
-          );
-          allWrappers.forEach(wrapper => {
-            const option = wrapper.querySelector('[role="option"]');
-            if (option) {
-              const optionKey = option.getAttribute('data-key');
-              if (optionKey && !expectedKeysForCustomer.includes(optionKey)) {
-                wrapper.style.top = '-9999px';
-                wrapper.style.left = '-9999px';
-                wrapper.style.visibility = 'hidden';
-                wrapper.style.opacity = '0';
-              }
-            }
-          });
-        }
-        
-        // Use requestAnimationFrame for immediate filtering (runs before paint)
-        let filterLoopCount = 0;
-        immediateFilterInterval = requestAnimationFrame(function filterLoop() {
-          filterLoopCount++;
-          if (currentFilterCustomer !== 'ALL' && document.body.contains(listboxContainer)) {
-            const allWrappers = Array.from(listboxContainer.querySelectorAll('[role="presentation"]')).filter(wrapper => 
-              wrapper.querySelector('[role="option"]') && wrapper.style.position === 'absolute'
-            );
-            
-            let hiddenCount = 0;
-            allWrappers.forEach(wrapper => {
-              const option = wrapper.querySelector('[role="option"]');
-              if (option) {
-                const optionKey = option.getAttribute('data-key');
-                if (optionKey && !expectedKeysForCustomer.includes(optionKey)) {
-                  if (wrapper.style.top !== '-9999px') {
-                    hiddenCount++;
-                  }
-                  wrapper.style.top = '-9999px';
-                  wrapper.style.left = '-9999px';
-                  wrapper.style.visibility = 'hidden';
-                  wrapper.style.opacity = '0';
-                }
-              }
-            });
-            
-            // Continue until we have all items, then stop
-            if (allWrappers.length < 11) {
-              immediateFilterInterval = requestAnimationFrame(filterLoop);
-            } else {
-              immediateFilterInterval = null;
-            }
-          }
-        });
-        
-        // Force React to re-render by triggering a resize event
-        const resizeEvent = new Event('resize', { bubbles: true });
-        window.dispatchEvent(resizeEvent);
-        
-        // Also try to trigger React's internal update by modifying a data attribute
-        listboxContainer.setAttribute('data-gs4pm-force-render', Date.now().toString());
-        
-        // Try scrolling the container to trigger React's virtualization to render more items
-        // React's virtualization checks scroll position to determine what's visible
-        if (parent.scrollHeight > parent.clientHeight) {
-          parent.scrollTop = parent.scrollHeight; // Scroll to bottom
-          setTimeout(() => {
-            parent.scrollTop = 0; // Scroll back to top
-          }, 50);
-        }
-        
-        // Set up observer to watch for new items being added
-        const heightChangeObserver = new MutationObserver((mutations) => {
-          const checkWrappers = Array.from(listboxContainer.querySelectorAll('[role="presentation"]')).filter(wrapper => 
-            wrapper.querySelector('[role="option"]') && wrapper.style.position === 'absolute'
-          );
-          
-          if (checkWrappers.length >= 11) {
-            console.log('[GS4PM Filter] ✅ Height change triggered React to render all', checkWrappers.length, 'items!');
-            heightChangeObserver.disconnect();
-            if (immediateFilterObserver) {
-              immediateFilterObserver.disconnect(); // Disconnect immediate filter observer
-            }
-            if (immediateFilterInterval) {
-              cancelAnimationFrame(immediateFilterInterval); // Cancel animation frame
-              immediateFilterInterval = null;
-            }
-            // Only proceed if not already filtering (prevent duplicate filtering)
-            if (!filteringListboxes.has(listboxContainer)) {
-              filterDropdownWithRetry(attempt + 1, maxAttempts);
-            } else {
-              console.log('[GS4PM Filter] ⏸️ Skipping filterDropdownWithRetry - already filtering this listbox');
-            }
-          }
-        });
-        
-        heightChangeObserver.observe(listboxContainer, { childList: true, subtree: true });
-        
-        // Fallback: if observer doesn't trigger, retry after delay
-        const timeoutId = setTimeout(() => {
-          heightChangeObserver.disconnect();
-          if (immediateFilterObserver) {
-            immediateFilterObserver.disconnect(); // Disconnect immediate filter observer
-          }
-          if (immediateFilterInterval) {
-            cancelAnimationFrame(immediateFilterInterval); // Cancel animation frame
-            immediateFilterInterval = null;
-          }
-          // Only proceed if not already filtering (prevent duplicate filtering)
-          if (!filteringListboxes.has(listboxContainer)) {
-            const checkWrappers = Array.from(listboxContainer.querySelectorAll('[role="presentation"]')).filter(wrapper => 
-              wrapper.querySelector('[role="option"]') && wrapper.style.position === 'absolute'
-            );
-            filterDropdownWithRetry(attempt + 1, maxAttempts);
-          } else {
-            console.log('[GS4PM Filter] ⏸️ Fallback timeout skipped - already filtering this listbox');
-          }
-        }, 500); // Increased to 500ms
-        dropdownRetryTimeouts.push(timeoutId);
-        return;
-      }
-      
       // Query FRESH wrappers from DOM (not stale references)
       const freshWrappers = Array.from(listboxContainer.querySelectorAll('[role="presentation"]')).filter(wrapper => 
         wrapper.querySelector('[role="option"]') && wrapper.style.position === 'absolute'
       );
-      
-      // Also check for options directly by data-key (more reliable than wrapper count)
-      const allOptions = Array.from(listboxContainer.querySelectorAll('[role="option"]'));
-      const expectedKeys = {
-        'Ladbrokes': ['Rc691c7ec72417932481c122f7', 'Rc691c7ecc770c9e030959527a', 'Rc691dcb1f770c9e0309817a12', 'Rc691c7ed02417932481c12568'], // Darts, Football, Live Casino, Responsible Returner
-        'WKND': ['Rc677bf0a47dc0b924845c6e17', 'Rc677bf1098c4eb7177f7882ca', 'Rc677bf2057dc0b924845c6e2c', 'Rc677bf30eaf536d72a095c1bd', 'Rc677bf4bbaf536d72a095c1ce', 'Rc677bf1948c4eb7177f7882f8', 'Rc677bf2668c4eb7177f788332'] // All WKND personas
-      };
-      
-      const expectedKeysForCustomer = expectedKeys[currentFilterCustomer] || [];
-      const foundKeys = allOptions.map(opt => opt.getAttribute('data-key')).filter(Boolean);
-      const missingKeys = expectedKeysForCustomer.filter(key => !foundKeys.includes(key));
-      
-      // Log what we found
-      const foundItems = freshWrappers.map(w => {
-        const opt = w.querySelector('[role="option"]');
-        const key = opt ? opt.getAttribute('data-key') : 'no-key';
-        const text = opt ? opt.textContent.trim() : 'unknown';
-        return text + ' (' + key + ')';
-      });
-      // Only log if keys are missing
-      if (missingKeys.length > 0) {
-        console.log('[GS4PM Filter] ⚠️ Missing keys:', missingKeys);
-      }
-      
-      // Check if missing items exist elsewhere in DOM (React might render them outside listbox initially)
-      if (missingKeys.length > 0) {
-        const missingInDOM = missingKeys.filter(key => {
-          const found = document.querySelector(`[data-key="${key}"]`);
-          return found !== null;
-        });
-        if (missingInDOM.length > 0) {
-          console.log('[GS4PM Filter] 🔍 Found', missingInDOM.length, 'missing items elsewhere in DOM:', missingInDOM.join(', '));
-          // Items exist but not in listbox - might need to wait for React to move them
-        }
-      }
-      
-      // If we're missing expected keys, React hasn't rendered them yet - wait longer
-      if (missingKeys.length > 0 && attempt < maxAttempts) {
-        const delay = Math.min(attempt * 300, 1000); // 300ms, 600ms, 900ms, max 1000ms
-        console.log('[GS4PM Filter] ⏳ Missing keys:', missingKeys.join(', '), '- retrying in', delay + 'ms...');
+
+      // If virtualization is still hydrating items, retry briefly (when the DOM exposes a total).
+      const inferredTotal = inferListboxTotalOptionCount(listboxContainer);
+      if (inferredTotal && freshWrappers.length < inferredTotal && attempt < maxAttempts) {
+        const delay = Math.min(attempt * 250, 1000);
         const timeoutId = setTimeout(() => filterDropdownWithRetry(attempt + 1, maxAttempts), delay);
         dropdownRetryTimeouts.push(timeoutId);
         return;
@@ -3527,35 +3109,6 @@ function applyFilterToNode(node) {
         console.log('[GS4PM Filter] 🔁 Retry attempt', attempt + ':', 'visible =', visibleDropdownWrappers.length, 'hidden =', hiddenDropdownWrappers.length);
       }
       
-      // If we're filtering for a specific customer and found fewer items than expected, retry
-      // Expected: Ladbrokes = 4 visible, WKND = 7 visible, ALL = all items
-      // But we need to check TOTAL wrappers first - if React hasn't rendered all items yet,
-      // we won't have enough total wrappers to filter from
-      const expectedCounts = { 'Ladbrokes': 4, 'WKND': 7 };
-      const expectedCount = expectedCounts[currentFilterCustomer];
-      
-      // For Ladbrokes, we expect 4 visible + 7 hidden = 11 total
-      // For WKND, we expect 7 visible + 4 hidden = 11 total
-      const expectedTotal = 11; // Both customers have 11 total personas
-      
-      // If we don't have enough total wrappers, React hasn't finished rendering
-      if (freshWrappers.length < expectedTotal && attempt < maxAttempts) {
-        const delay = attempt * 200; // 200ms, 400ms, 600ms, 800ms
-        console.log('[GS4PM Filter] ⏳ Only found', freshWrappers.length, 'total wrappers, expected', expectedTotal, '- retrying in', delay + 'ms...');
-        const timeoutId = setTimeout(() => filterDropdownWithRetry(attempt + 1, maxAttempts), delay);
-        dropdownRetryTimeouts.push(timeoutId);
-        return;
-      }
-      
-      // If we have enough total wrappers but not enough visible, that's a filtering issue
-      if (expectedCount && visibleDropdownWrappers.length < expectedCount && attempt < maxAttempts) {
-        const delay = attempt * 200;
-        console.log('[GS4PM Filter] ⏳ Found', freshWrappers.length, 'total but only', visibleDropdownWrappers.length, 'visible, expected', expectedCount, '- retrying in', delay + 'ms...');
-        const timeoutId = setTimeout(() => filterDropdownWithRetry(attempt + 1, maxAttempts), delay);
-        dropdownRetryTimeouts.push(timeoutId);
-        return;
-      }
-      
       // REMOVED: Pre-setting height before filtering was causing React to remove items
       // Instead, we'll filter first, then set height after items are positioned
       // This ensures React has all items rendered before we adjust heights
@@ -3566,12 +3119,9 @@ function applyFilterToNode(node) {
         reorderVirtualizedDropdown(visibleDropdownWrappers, hiddenDropdownWrappers);
         
         // Mark filtering as complete after a delay to allow React to settle
-        // Only clear if this was the final attempt (no more retries scheduled)
-        if (attempt >= maxAttempts || freshWrappers.length >= expectedTotal) {
-          setTimeout(() => {
-            filteringListboxes.delete(listboxContainer);
-          }, 1000); // Increased delay to ensure all retries complete
-        }
+        setTimeout(() => {
+          filteringListboxes.delete(listboxContainer);
+        }, 1000); // Delay to ensure React settles
       } else {
         // No items to filter, mark as complete immediately
         filteringListboxes.delete(listboxContainer);
@@ -3603,18 +3153,10 @@ function applyFilterToNode(node) {
       // Count is stable, increment counter
       stableCount++;
       
-      // If count has been stable for 2 observations, filter
-      const expectedCounts = { 'Ladbrokes': 4, 'WKND': 7 };
-      const expectedCount = expectedCounts[currentFilterCustomer];
-      
-      if (stableCount >= 2) {
+      // If count has been stable for 2 observations (or we reached a known total), filter.
+      const inferredTotal = inferListboxTotalOptionCount(listboxContainer);
+      if (stableCount >= 2 || (inferredTotal && currentWrappers.length >= inferredTotal)) {
         console.log('[GS4PM Filter] ✅ Item count stable at', currentWrappers.length, 'items, filtering now');
-        dropdownItemObserver.disconnect();
-        dropdownItemObserver = null;
-        filterDropdownWithRetry();
-      } else if (!expectedCount || currentWrappers.length >= expectedCount || currentWrappers.length >= 10) {
-        // Have enough items, filter immediately
-        console.log('[GS4PM Filter] ✅ Found', currentWrappers.length, 'items (expected', expectedCount || 'any', '), filtering now');
         dropdownItemObserver.disconnect();
         dropdownItemObserver = null;
         filterDropdownWithRetry();
@@ -3701,6 +3243,7 @@ function tagSelectorForCurrentCustomer(selector) {
           currentFilterCustomer = active;
           applyFilter(active);
           if (shouldRenderBadges()) refreshBadges();
+          try { scheduleBrandLibraryCardLabelRefresh(); } catch (e) {}
         });
       });
     } else {
@@ -3712,8 +3255,381 @@ function tagSelectorForCurrentCustomer(selector) {
 
 // ===== Brand library cards: table tagging + hover highlight target =====
 
+// Brand Library card labels rendered via an overlay layer (same approach as the
+// blue dotted hover outline): we do NOT modify any shadow roots or card internals.
+// This is the most reliable method under virtualization + Spectrum web components.
+const BRAND_CARD_LABEL_STYLE_ID = 'gs4pm-brand-card-label-style';
+const BRAND_CARD_LABEL_LAYER_ID = 'gs4pm-brand-card-label-layer';
+const BRAND_CARD_LABEL_CLASS = 'gs4pm-brand-card-label';
+const BRAND_CARD_SELECTOR = '[data-test-id^="library-grid-mosaic-card-"]';
+let brandLibraryLabelLayerEl = null;
+let brandLibraryLabelObserver = null;
+let brandLibraryLabelObservedGrid = null;
+let brandLibraryLabelRefreshTimeout = null;
+let brandLibraryLabelScheduled = false;
+let brandLibraryLabelInitAttempts = 0;
+let brandLibraryLabelInitTimeout = null;
+const brandLibraryLabelByCard = new Map(); // Element -> HTMLDivElement
+
+function ensureBrandLibraryCardLabelStyles() {
+  if (document.getElementById(BRAND_CARD_LABEL_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = BRAND_CARD_LABEL_STYLE_ID;
+  style.textContent = `
+    /* Overlay layer for brand labels */
+    #${BRAND_CARD_LABEL_LAYER_ID}{
+      position: fixed !important;
+      left: 0 !important;
+      top: 0 !important;
+      width: 0 !important;
+      height: 0 !important;
+      z-index: 2147483646 !important;
+      pointer-events: none !important;
+    }
+    #${BRAND_CARD_LABEL_LAYER_ID} .${BRAND_CARD_LABEL_CLASS}{
+      position: fixed !important;
+      left: 0;
+      top: 0;
+      transform: translate(-9999px, -9999px);
+      pointer-events: none !important;
+      padding: 4px 8px !important;
+      border-radius: 999px !important;
+      background: rgba(0, 0, 0, 0.72) !important;
+      border: 1px solid rgba(46, 224, 113, 0.28) !important;
+      color: rgba(255, 255, 255, 0.92) !important;
+      font: 750 11px system-ui, -apple-system, Segoe UI, sans-serif !important;
+      line-height: 1.15 !important;
+      letter-spacing: 0.01em !important;
+      overflow: hidden !important;
+      text-overflow: ellipsis !important;
+      white-space: nowrap !important;
+      box-shadow: 0 10px 22px rgba(46,224,113,0.10), 0 10px 22px rgba(0,0,0,0.24) !important;
+      backdrop-filter: blur(6px) !important;
+      -webkit-backdrop-filter: blur(6px) !important;
+    }
+  `;
+  (document.head || document.documentElement).appendChild(style);
+}
+
+function clearBrandLibraryCardLabels({ removeLayer = false } = {}) {
+  // Remove all label elements and clear tracking.
+  try {
+    brandLibraryLabelByCard.forEach((labelEl) => {
+      try { labelEl?.remove?.(); } catch (e) {}
+    });
+  } catch (e) {}
+  brandLibraryLabelByCard.clear();
+
+  if (removeLayer) {
+    try { brandLibraryLabelLayerEl?.remove?.(); } catch (e) {}
+    brandLibraryLabelLayerEl = null;
+  } else if (brandLibraryLabelLayerEl && brandLibraryLabelLayerEl.isConnected) {
+    // Keep the layer but empty it (safety).
+    try { brandLibraryLabelLayerEl.innerHTML = ''; } catch (e) {}
+  }
+
+  // If the grid is gone, disconnect the observer so we don’t leak work.
+  try { brandLibraryLabelObserver?.disconnect?.(); } catch (e) {}
+  brandLibraryLabelObserver = null;
+  brandLibraryLabelObservedGrid = null;
+}
+
 function getBrandLibraryGrid() {
   return deepQuerySelector('#library-grid[data-test-id="library-grid"]');
+}
+
+function ensureBrandLibraryLabelLayer() {
+  if (brandLibraryLabelLayerEl && brandLibraryLabelLayerEl.isConnected) return brandLibraryLabelLayerEl;
+  const existing = document.getElementById(BRAND_CARD_LABEL_LAYER_ID);
+  if (existing) {
+    brandLibraryLabelLayerEl = existing;
+    return brandLibraryLabelLayerEl;
+  }
+  const layer = document.createElement('div');
+  layer.id = BRAND_CARD_LABEL_LAYER_ID;
+  (document.body || document.documentElement).appendChild(layer);
+  brandLibraryLabelLayerEl = layer;
+  return layer;
+}
+
+function deepQuerySelectorAll(selector, root = document) {
+  // Collect matches from root + any open shadow roots beneath it.
+  const results = new Set();
+  const visited = new Set();
+  const stack = [];
+
+  const enqueueShadowRoots = (node) => {
+    if (!node || typeof node.querySelectorAll !== 'function') return;
+    let all;
+    try {
+      all = node.querySelectorAll('*');
+    } catch (e) {
+      return;
+    }
+    all.forEach((el) => {
+      const sr = el && el.shadowRoot;
+      if (sr && !visited.has(sr)) {
+        visited.add(sr);
+        stack.push(sr);
+      }
+    });
+  };
+
+  const addMatches = (node) => {
+    if (!node || typeof node.querySelectorAll !== 'function') return;
+    try {
+      node.querySelectorAll(selector).forEach((el) => results.add(el));
+    } catch (e) {}
+  };
+
+  addMatches(root);
+  enqueueShadowRoots(root);
+  while (stack.length) {
+    const sr = stack.pop();
+    addMatches(sr);
+    enqueueShadowRoots(sr);
+  }
+
+  return Array.from(results);
+}
+
+function getBrandKeyFromCard(cardEl) {
+  if (!(cardEl instanceof Element)) return null;
+  // First try direct/closest (fast path)
+  try {
+    const direct = cardEl.getAttribute('data-key');
+    if (direct) return direct;
+  } catch {}
+  try {
+    const c = cardEl.closest('div.library-list-item-container[data-key]');
+    const k = c?.getAttribute('data-key');
+    if (k) return k;
+  } catch {}
+
+  // Cross shadow boundaries by walking up through shadow hosts.
+  let node = cardEl;
+  for (let i = 0; i < 40 && node; i++) {
+    if (node instanceof Element) {
+      const k = node.getAttribute('data-key');
+      if (k) return k;
+      if (node.parentElement) {
+        node = node.parentElement;
+        continue;
+      }
+      const root = node.getRootNode?.();
+      if (root && root instanceof ShadowRoot && root.host) {
+        node = root.host;
+        continue;
+      }
+    }
+    break;
+  }
+  return null;
+}
+
+function getBrandLibraryCardLabel(cardEl) {
+  if (!(cardEl instanceof Element)) return 'Brand';
+  const aria = (cardEl.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+  if (aria) return aria;
+  try {
+    const heading = cardEl.querySelector('[slot="heading"]');
+    const txt = (heading?.textContent || '').replace(/\s+/g, ' ').trim();
+    if (txt) return txt;
+  } catch (e) {}
+  return 'Brand';
+}
+
+function buildCustomerSetByBrandKey(tags) {
+  const map = new Map(); // key -> Set(customers)
+  (tags || []).forEach((t) => {
+    const customer = t?.customer;
+    const key = extractAttrFromSelector(t?.selector, 'data-key');
+    if (!customer || !key) return;
+    let set = map.get(key);
+    if (!set) {
+      set = new Set();
+      map.set(key, set);
+    }
+    set.add(customer);
+  });
+  return map;
+}
+
+function upsertBrandLibraryCardLabel(cardEl, text) {
+  if (!(cardEl instanceof Element)) return;
+  const layer = ensureBrandLibraryLabelLayer();
+
+  let labelEl = brandLibraryLabelByCard.get(cardEl) || null;
+  if (!labelEl || !labelEl.isConnected) {
+    labelEl = document.createElement('div');
+    labelEl.className = BRAND_CARD_LABEL_CLASS;
+    labelEl.setAttribute('aria-hidden', 'true');
+    layer.appendChild(labelEl);
+    brandLibraryLabelByCard.set(cardEl, labelEl);
+  }
+
+  labelEl.textContent = String(text || '').trim() || 'Brand';
+
+  const rect = cardEl.getBoundingClientRect?.();
+  if (!rect || rect.width < 2 || rect.height < 2) {
+    labelEl.style.transform = 'translate(-9999px, -9999px)';
+    return;
+  }
+
+  // Skip offscreen cards (virtualization can keep lots of nodes around).
+  const vw = window.innerWidth || 0;
+  const vh = window.innerHeight || 0;
+  if (rect.bottom < -40 || rect.top > vh + 40 || rect.right < -40 || rect.left > vw + 40) {
+    labelEl.style.transform = 'translate(-9999px, -9999px)';
+    return;
+  }
+
+  const x = Math.max(0, rect.left + 8);
+  const y = Math.max(0, rect.top + 8);
+  labelEl.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+  // Clamp width to card width so long customer lists don't overflow.
+  const maxW = Math.max(80, Math.round(rect.width - 16));
+  labelEl.style.maxWidth = `${maxW}px`;
+}
+
+function removeBrandLibraryCardLabel(cardEl) {
+  const labelEl = brandLibraryLabelByCard.get(cardEl);
+  if (labelEl && labelEl.remove) labelEl.remove();
+  brandLibraryLabelByCard.delete(cardEl);
+}
+
+function applyBrandLibraryCardLabels(root = document) {
+  // If we're neither tagging nor filtering, don't show persistent brand labels.
+  if (!shouldRenderBrandLibraryCardLabels()) {
+    clearBrandLibraryCardLabels({ removeLayer: false });
+    return;
+  }
+
+  const grid = getBrandLibraryGrid();
+  if (!grid) {
+    // If we navigated away from Brands Library, ensure labels don’t “stick” on screen.
+    clearBrandLibraryCardLabels({ removeLayer: false });
+    return;
+  }
+  ensureBrandLibraryCardLabelStyles();
+  ensureBrandLibraryLabelLayer();
+
+  // Performance: scope to grid or a node within grid; include open shadow roots under that scope.
+  let scope = grid;
+  if (root instanceof Element && grid.contains(root)) scope = root;
+
+  const tagMap = buildCustomerSetByBrandKey(cachedTags);
+
+  const candidates = [];
+  if (scope instanceof Element && scope.matches(BRAND_CARD_SELECTOR)) candidates.push(scope);
+  deepQuerySelectorAll(BRAND_CARD_SELECTOR, scope).forEach((el) => candidates.push(el));
+
+  const currentCards = new Set();
+
+  candidates.forEach((el) => {
+    if (!(el instanceof Element)) return;
+    const testId = el.getAttribute('data-test-id') || '';
+    if (!testId || !testId.startsWith('library-grid-mosaic-card-')) return;
+    currentCards.add(el);
+
+    const key = getBrandKeyFromCard(el);
+    const customers = key ? Array.from(tagMap.get(key) || []) : [];
+
+    // Only show a label when the brand is tagged (this matches “see what it’s tagged as”).
+    if (!customers.length) {
+      removeBrandLibraryCardLabel(el);
+      return;
+    }
+
+    const text = customers.sort().join(', ') || getBrandLibraryCardLabel(el);
+    upsertBrandLibraryCardLabel(el, text);
+  });
+
+  // Cleanup labels for cards that were recycled/removed.
+  // Only do a full cleanup when we scanned the whole grid; avoid removing labels
+  // for cards outside a partial subtree refresh.
+  if (scope === grid) {
+    Array.from(brandLibraryLabelByCard.keys()).forEach((card) => {
+      if (!(card instanceof Element) || !card.isConnected || !currentCards.has(card)) {
+        removeBrandLibraryCardLabel(card);
+      }
+    });
+  } else {
+    // Still clean up disconnected cards (safe).
+    Array.from(brandLibraryLabelByCard.keys()).forEach((card) => {
+      if (!(card instanceof Element) || !card.isConnected) removeBrandLibraryCardLabel(card);
+    });
+  }
+}
+
+function scheduleBrandLibraryCardLabelRefresh(root) {
+  if (brandLibraryLabelScheduled) return;
+  brandLibraryLabelScheduled = true;
+
+  // Small debounce for bursts of mutations.
+  if (brandLibraryLabelRefreshTimeout) clearTimeout(brandLibraryLabelRefreshTimeout);
+  brandLibraryLabelRefreshTimeout = setTimeout(() => {
+    requestAnimationFrame(() => {
+      brandLibraryLabelScheduled = false;
+      try {
+        applyBrandLibraryCardLabels(root || getBrandLibraryGrid() || document);
+      } catch (e) {}
+    });
+  }, 60);
+}
+
+function initBrandLibraryCardLabels() {
+  const grid = getBrandLibraryGrid();
+  if (!grid) {
+    // Grid can mount late (SPA + virtualization). Retry briefly.
+    if (brandLibraryLabelInitAttempts < 20) {
+      brandLibraryLabelInitAttempts++;
+      if (brandLibraryLabelInitTimeout) clearTimeout(brandLibraryLabelInitTimeout);
+      brandLibraryLabelInitTimeout = setTimeout(() => {
+        try { initBrandLibraryCardLabels(); } catch (e) {}
+      }, 250);
+    }
+    return;
+  }
+  brandLibraryLabelInitAttempts = 0;
+  if (brandLibraryLabelInitTimeout) {
+    clearTimeout(brandLibraryLabelInitTimeout);
+    brandLibraryLabelInitTimeout = null;
+  }
+
+  // Apply once immediately.
+  scheduleBrandLibraryCardLabelRefresh(grid);
+
+  // Attach a scoped observer to handle virtualization/remounts.
+  if (brandLibraryLabelObserver && brandLibraryLabelObservedGrid === grid && grid.isConnected) return;
+  try {
+    brandLibraryLabelObserver?.disconnect?.();
+  } catch (e) {}
+
+  brandLibraryLabelObservedGrid = grid;
+  brandLibraryLabelObserver = new MutationObserver((mutations) => {
+    // Debounce to avoid thrashing under rapid virtualization churn.
+    let shouldRefresh = false;
+    for (const m of mutations) {
+      if (m.type === 'childList' && (m.addedNodes?.length || m.removedNodes?.length)) {
+        shouldRefresh = true;
+        break;
+      }
+      if (m.type === 'attributes') {
+        shouldRefresh = true;
+        break;
+      }
+    }
+    if (!shouldRefresh) return;
+    scheduleBrandLibraryCardLabelRefresh(grid);
+  });
+
+  brandLibraryLabelObserver.observe(grid, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['aria-label', 'data-test-id']
+  });
 }
 
 function getBrandLibraryHoverTarget(dropTargetEl) {
@@ -3879,7 +3795,7 @@ function startTagging(customer) {
     positionHoverHighlight(lastOutlinedContainer);
   };
 
-  const repositionHighlight = () => {
+  repositionHighlight = () => {
     if (!tagging) return;
     if (!lastOutlinedContainer || !(lastOutlinedContainer instanceof Element)) return;
     positionHoverHighlight(lastOutlinedContainer);
@@ -4011,6 +3927,10 @@ function startTagging(customer) {
 
   loadTags(() => {
     refreshBadges();
+    // Brand library card labels are an overlay that won’t re-render unless we
+    // explicitly schedule it (the virtualized grid often doesn't mutate).
+    try { initBrandLibraryCardLabels(); } catch (e) {}
+    try { scheduleBrandLibraryCardLabelRefresh(); } catch (e) {}
   });
 }
 
@@ -4018,24 +3938,27 @@ function stopTagging() {
   tagging = false;
   currentTagCustomer = null;
 
-  document.removeEventListener('pointermove', hoverHandler, true);
+  if (hoverHandler) document.removeEventListener('pointermove', hoverHandler, true);
   if (pointerDownHandler) document.removeEventListener('pointerdown', pointerDownHandler, true);
   if (pointerUpHandler) document.removeEventListener('pointerup', pointerUpHandler, true);
-  document.removeEventListener('click', clickHandler, true);
+  if (clickHandler) document.removeEventListener('click', clickHandler, true);
   if (escapeHandler) {
     document.removeEventListener('keydown', escapeHandler, true);
   }
   if (bannerResizeHandler) {
     window.removeEventListener('resize', bannerResizeHandler, false);
   }
-  window.removeEventListener('scroll', repositionHighlight, true);
-  window.removeEventListener('resize', repositionHighlight, false);
+  if (repositionHighlight) {
+    window.removeEventListener('scroll', repositionHighlight, true);
+    window.removeEventListener('resize', repositionHighlight, false);
+  }
 
   hoverHandler = null;
   clickHandler = null;
   pointerDownHandler = null;
   pointerUpHandler = null;
   escapeHandler = null;
+  repositionHighlight = null;
   bannerResizeHandler = null;
 
   if (lastOutlinedContainer) {
@@ -4046,12 +3969,11 @@ function stopTagging() {
   // Remove ARIA/data "table" tagging applied for brand library cards (only while tagging mode is active).
   try { cleanupBrandLibraryTable(); } catch (e) {}
 
-  // Keep badges if a specific filter is active; otherwise clean up.
-  if (shouldRenderBadges()) {
-    refreshBadges();
-  } else {
-    removeAllBadges(true);
-  }
+  // Tags/badges should never persist outside tagging mode (even if a filter is active).
+  removeAllBadges(true);
+
+  // Brand library labels should never persist outside tagging mode.
+  try { clearBrandLibraryCardLabels({ removeLayer: false }); } catch (e) {}
   removeTaggingBanner();
 
   console.log('[GS4PM Filter] Tagging mode OFF in frame', window.location.href);
@@ -4180,6 +4102,8 @@ if (chrome.runtime && chrome.runtime.id) {
     safeStorageSet({ [ACTIVE_FILTER_KEY]: customer }, () => {
       applyFilter(customer);
       if (shouldRenderBadges()) refreshBadges();
+      // Filtering can hide/move cards without DOM mutations; refresh label overlays explicitly.
+      try { scheduleBrandLibraryCardLabelRefresh(); } catch (e) {}
     });
   } else if (msg.type === 'TAG_LAST_RIGHT_CLICKED') {
     if (lastRightClickedSelector) {
@@ -4187,6 +4111,18 @@ if (chrome.runtime && chrome.runtime.id) {
       tagSelectorForCurrentCustomer(lastRightClickedSelector);
     } else {
       console.warn('[GS4PM Filter] No right-clicked element recorded to tag.');
+    }
+  } else if (msg.type === 'SET_OVERLAY_VISIBLE') {
+    // Only the top frame owns the workspace bar DOM.
+    if (!isTopFrame()) return;
+    try { ensureWorkspaceBar(); } catch {}
+    const overlay = document.getElementById(OVERLAY_ID);
+    if (overlay) {
+      const visible = !!msg.visible;
+      overlay.setAttribute('data-hidden', visible ? 'false' : 'true');
+      if (visible) {
+        try { overlay.focus(); } catch {}
+      }
     }
   }
   });
@@ -4198,11 +4134,25 @@ if (chrome.runtime && chrome.runtime.id) {
 if (chrome.runtime && chrome.runtime.id) {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
+    if (changes[TAGGING_ENABLED_KEY]) {
+      const enabled = !!changes[TAGGING_ENABLED_KEY].newValue;
+      if (!enabled) {
+        try { stopTagging(); } catch (e) {}
+      } else {
+        // If a tab/frame missed the broadcast, recover from storage state.
+        safeStorageGet([CURRENT_CUSTOMER_KEY], (data) => {
+          const c = data[CURRENT_CUSTOMER_KEY];
+          if (!c || c === '__ALL__' || c === 'ALL') return;
+          try { startTagging(c); } catch (e) {}
+        });
+      }
+    }
     if (changes[ACTIVE_FILTER_KEY]) {
       const newVal = changes[ACTIVE_FILTER_KEY].newValue || 'ALL';
       console.log('[GS4PM Filter] ACTIVE_FILTER_KEY changed, applying:', newVal, 'in frame', window.location.href);
       currentFilterCustomer = newVal;
       applyFilter(newVal);
+      try { scheduleBrandLibraryCardLabelRefresh(); } catch (e) {}
       
       // Also explicitly re-filter any open dropdowns (in case timing is off)
       setTimeout(() => {
@@ -4245,6 +4195,7 @@ function scheduleBrandFilterRefresh() {
     brandFilterRefreshScheduled = false;
     // Re-apply brand filtering to handle virtualization re-mounts.
     updateBrandLibraryCssFilter(currentFilterCustomer, cachedTags);
+    try { scheduleBrandLibraryCardLabelRefresh(); } catch (e) {}
   });
 }
 
@@ -4326,6 +4277,7 @@ window.addEventListener(
   'scroll',
   () => {
     scheduleBadgeRefresh();
+    try { scheduleBrandLibraryCardLabelRefresh(); } catch (e) {}
   },
   true
 );
@@ -4333,8 +4285,11 @@ window.addEventListener(
 // Watch for SPA-style route changes (pathname changes without full reload)
 function handleRouteChange() {
   console.log('[GS4PM Filter] Route changed to', location.pathname, 're-applying filter:', currentFilterCustomer);
+  // Ensure brand labels don’t persist across routes.
+  try { clearBrandLibraryCardLabels({ removeLayer: false }); } catch (e) {}
   cachedTags = [];
   applyFilter(currentFilterCustomer || 'ALL');
+  try { initBrandLibraryCardLabels(); } catch (e) {}
 }
 
 setInterval(() => {
@@ -4343,96 +4298,6 @@ setInterval(() => {
     handleRouteChange();
   }
 }, 500);
-
-// Seed test data for demo purposes
-function seedTestTags() {
-  if (!chrome.runtime || !chrome.runtime.id) {
-    console.log('[GS4PM Filter] Skipping test data seed - extension context unavailable');
-    return;
-  }
-  
-  const pageKey = getPageKey();
-  
-  chrome.storage.local.get([pageKey, 'gs4pm_customers'], data => {
-    if (chrome.runtime.lastError) {
-      console.warn('[GS4PM Filter] Could not check for existing tags:', chrome.runtime.lastError.message);
-      return;
-    }
-    const existingTags = data[pageKey] || [];
-    
-    // Only seed if no tags exist yet
-    if (existingTags.length > 0) {
-      console.log('[GS4PM Filter] Tags already exist, skipping seed');
-      return;
-    }
-    
-    console.log('[GS4PM Filter] Seeding test tags...');
-    
-    // Ensure customers exist
-    const customers = data['gs4pm_customers'] || [];
-    const updatedCustomers = [...customers];
-    if (!updatedCustomers.includes('Ladbrokes')) updatedCustomers.push('Ladbrokes');
-    if (!updatedCustomers.includes('WKND')) updatedCustomers.push('WKND');
-    
-    // Hardcoded test tags based on reference IDs from the personas
-    // Using compound selectors to match BOTH cards AND dropdown options
-    // CORRECTED BASED ON ACTUAL HTML data-key VALUES
-    const testTags = [
-      // Ladbrokes personas (verified from HTML)
-      { selector: '[data-omega-attribute-referenceid="Rc691c7ec72417932481c122f7"], [data-key="Rc691c7ec72417932481c122f7"]', customer: 'Ladbrokes' }, // Darts Devotee
-      { selector: '[data-omega-attribute-referenceid="Rc691c7ecc770c9e030959527a"], [data-key="Rc691c7ecc770c9e030959527a"]', customer: 'Ladbrokes' }, // Football Fanatic
-      { selector: '[data-omega-attribute-referenceid="Rc691dcb1f770c9e0309817a12"], [data-key="Rc691dcb1f770c9e0309817a12"]', customer: 'Ladbrokes' }, // Live Casino Enthusiast
-      { selector: '[data-omega-attribute-referenceid="Rc691c7ed02417932481c12568"], [data-key="Rc691c7ed02417932481c12568"]', customer: 'Ladbrokes' }, // Responsible Returner (needs to be found)
-      
-      // WKND personas (7 cards)
-      { selector: '[data-omega-attribute-referenceid="Rc677bf4bbaf536d72a095c1ce"], [data-key="Rc677bf4bbaf536d72a095c1ce"]', customer: 'WKND' },
-      { selector: '[data-omega-attribute-referenceid="Rc677bf30eaf536d72a095c1bd"], [data-key="Rc677bf30eaf536d72a095c1bd"]', customer: 'WKND' },
-      { selector: '[data-omega-attribute-referenceid="Rc677bf2668c4eb7177f788332"], [data-key="Rc677bf2668c4eb7177f788332"]', customer: 'WKND' },
-      { selector: '[data-omega-attribute-referenceid="Rc677bf2057dc0b924845c6e2c"], [data-key="Rc677bf2057dc0b924845c6e2c"]', customer: 'WKND' },
-      { selector: '[data-omega-attribute-referenceid="Rc677bf1948c4eb7177f7882f8"], [data-key="Rc677bf1948c4eb7177f7882f8"]', customer: 'WKND' },
-      { selector: '[data-omega-attribute-referenceid="Rc677bf1098c4eb7177f7882ca"], [data-key="Rc677bf1098c4eb7177f7882ca"]', customer: 'WKND' },
-      { selector: '[data-omega-attribute-referenceid="Rc677bf0a47dc0b924845c6e17"], [data-key="Rc677bf0a47dc0b924845c6e17"]', customer: 'WKND' }
-    ];
-    
-    chrome.storage.local.set({ 
-      [pageKey]: testTags,
-      'gs4pm_customers': updatedCustomers
-    }, () => {
-      if (chrome.runtime.lastError) {
-        console.warn('[GS4PM Filter] Could not save test tags:', chrome.runtime.lastError.message);
-        return;
-      }
-      console.log('[GS4PM Filter] Seeded', testTags.length, 'test tags for Ladbrokes and WKND');
-      cachedTags = testTags;
-    });
-  });
-}
-
-// Call seed function on load (only runs if no tags exist)
-seedTestTags();
-
-// Expose function to console for manual re-seeding
-window.reseedGS4PMTags = function() {
-  if (!chrome.runtime || !chrome.runtime.id) {
-    console.warn('[GS4PM Filter] Cannot reseed - extension context unavailable. Please reload the page first.');
-    return;
-  }
-  
-  const pageKey = getPageKey();
-  chrome.storage.local.set({ [pageKey]: [] }, () => {
-    if (chrome.runtime.lastError) {
-      console.warn('[GS4PM Filter] Could not clear tags:', chrome.runtime.lastError.message);
-      return;
-    }
-    console.log('[GS4PM Filter] Cleared existing tags, re-seeding...');
-    seedTestTags();
-    setTimeout(() => {
-      location.reload();
-    }, 500);
-  });
-};
-
-console.log('[GS4PM Filter] 💡 Tip: Run reseedGS4PMTags() in console to reset test data');
 
 // Debug function to inspect filtering state
 window.debugGS4PMFilter = function() {
