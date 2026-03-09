@@ -1230,6 +1230,11 @@ function updateBrandLibraryCssFilter(activeCustomer, tags) {
     // Also clear any inline hides.
     const grid = getBrandLibraryGrid();
     if (grid) {
+      // Restore grid height even if card containers have not mounted yet.
+      if (grid.dataset.gs4pmOrigHeight !== undefined) {
+        grid.style.height = grid.dataset.gs4pmOrigHeight;
+        delete grid.dataset.gs4pmOrigHeight;
+      }
       const containers = Array.from(grid.querySelectorAll('div.library-list-item-container[data-key]'));
       containers.forEach(c => {
         if (!(c instanceof Element)) return;
@@ -1876,9 +1881,18 @@ function reorderVirtualizedGrid(visibleContainers, hiddenContainers) {
 }
 
 function restoreVirtualizedGrid(containers) {
-  if (containers.length === 0) return;
+  const grid = getBrandLibraryGrid();
+  if (containers.length === 0) {
+    // Virtualized remounts can briefly leave zero card nodes; still restore the
+    // grid height if we previously collapsed it.
+    if (grid && grid.dataset.gs4pmOrigHeight !== undefined) {
+      grid.style.height = grid.dataset.gs4pmOrigHeight;
+      delete grid.dataset.gs4pmOrigHeight;
+    }
+    return;
+  }
   
-  const parent = containers[0].parentElement;
+  const parent = containers[0].parentElement || grid;
   
   containers.forEach(container => {
     if (container.dataset.gs4pmOrigLeft !== undefined) {

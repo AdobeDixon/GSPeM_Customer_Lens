@@ -1,89 +1,109 @@
-# GenStudio Customer Lens 🎯
+# GenStudio Customer Lens
 
-A Chrome extension that adds customer-focused filtering and tagging to **GenStudio for Performance Marketing (GS4PM)** on `experience.adobe.com`.
+Customer Lens is a Chrome extension that helps you organize **GenStudio for Performance Marketing (GS4PM)** content by customer.
 
-## What it does ✨
+It works on `experience.adobe.com` pages where the URL includes `genstudio`.
 
-- Filters GS4PM content by customer (personas, products, assets, templates, and dropdown options).
-- Lets you tag tiles/cards and dropdown options with a customer.
-- Adds visual badges during tagging so you can see what’s tagged.
-- Keeps your active filter and customer list across GS4PM sections.
-- Adds a right‑click menu to tag the last clicked item.
-- Works reliably with GS4PM’s iframe-based UI (broadcasts actions to all frames, and can run in frames whose URL doesn’t include `genstudio` as long as the top tab is GS4PM).
-- Optional on-page **Workspace bar** (bottom overlay) so you don’t need to reopen the extension popup.
-- Keyboard shortcuts for power-users (see below).
+Repository: [https://github.com/AdobeDixon/GSPeM_Customer_Lens](https://github.com/AdobeDixon/GSPeM_Customer_Lens)
 
-## How it works 🧠
+## Why this extension exists
 
-- **Popup UI** (`popup.html`, `popup.js`)
-  - Choose an active filter.
-  - Pick a customer to tag against.
-  - Toggle tagging mode on/off.
-  - Add new customers.
-- **On-page Workspace bar** (`contentScript.js`)
-  - Optional bottom overlay (top-frame only) with quick access to filter, tagging target, tagging toggle, and quick-add customer.
-- **Content script** (`contentScript.js`)
-  - Watches the GS4PM DOM and applies filters in real time.
-  - Tags elements by storing a unique selector + customer.
-  - Adds on‑screen badges while tagging is enabled.
-  - Shows an “Esc to exit tagging” banner (top-frame only) while tagging is enabled.
-  - Tracks right‑click targets to support context‑menu tagging.
-- **Background service worker** (`background.js`)
-  - Builds the right‑click context menu.
-  - Broadcasts tag actions to all frames (GS4PM uses iframes).
-- **Storage**
-  - Customers, active filter, and tags are stored in `chrome.storage.local`.
-  - Tag data is scoped per GS4PM page key.
+GS4PM can contain many items across different customers. Customer Lens lets you:
 
-## Install (Chrome) 🧩
+- tag GS4PM items with a customer name
+- filter the page to show items for one customer
+- keep your customer setup and filter saved locally
 
-1. Open `chrome://extensions` in Chrome.
-2. Enable **Developer mode** (top right).
+This makes it easier to focus on one customer at a time.
+
+## What it can do
+
+- **Filter content by customer**
+  - Filter personas, products, assets, templates, and supported dropdown options.
+- **Tag items in the page**
+  - Turn on tagging mode, click an item, and toggle whether it belongs to the selected customer.
+- **Right-click tagging**
+  - Right-click an item and choose `Tag element -> [customer]`.
+  - You can also choose `Add new customer...` from the same menu.
+- **Visual tagging helpers**
+  - Shows badges/overlays in tagging mode so you can see tagged targets clearly.
+- **Keyboard shortcuts**
+  - `Cmd/Ctrl + K`: cycle active filter customer
+  - `Cmd/Ctrl + Shift + K`: cycle filter in reverse
+  - `Cmd/Ctrl + Shift + O`: show/hide Workspace bar
+  - `Esc`: exit tagging mode
+- **Workspace bar (optional, on-page controls)**
+  - A bottom overlay in the top frame for quick filter/tag controls without reopening the popup.
+- **Works across iframe-based GS4PM UI**
+  - Broadcasts actions to all frames so filtering and tagging stay consistent.
+- **Local persistence**
+  - Customers, active filter, and tags are saved in `chrome.storage.local`.
+
+## Installation (Chrome, step-by-step)
+
+1. Open Chrome and go to `chrome://extensions`.
+2. Turn on **Developer mode** (top-right toggle).
 3. Click **Load unpacked**.
-4. Select the folder: `GSPeM Demo Extension`.
-5. Open GS4PM at `https://experience.adobe.com/...genstudio...`.
+4. Select this project folder: `GSPeM Demo Extension`.
+5. Pin the extension (optional but recommended).
+6. Open GS4PM on `https://experience.adobe.com/...genstudio...`.
 
-## Usage 🚀
+If the extension was already loaded and you made code changes:
 
-1. Click the extension icon to open the popup.
-2. Add customers (if you don’t have any yet).
-3. Choose **Show content for** to filter the view.
-4. Pick a customer in **Tagging** and click **Enable tagging**.
-5. Click a tile/card/option in GS4PM to toggle its tag.
-6. (Optional) Right‑click any item and choose **Tag element → [customer]**.
-7. (Optional) Toggle the **Workspace bar** with `Cmd/Ctrl + Shift + O` (or use the bar’s Hide button) to get on-page controls without reopening the popup.
+- click **Reload** on the extension card in `chrome://extensions`
+- refresh the GS4PM tab
 
-## UI overview 🧩
+## First-time setup (recommended)
 
-- **Popup**
-  - **Filter → “Show content for”**: sets the active customer filter (or “Show all customers”).
-  - **Tagging → “Tag items for”**: selects the customer you’ll tag items against.
-  - **Enable/Disable tagging**: when enabled, clicks on supported GS4PM tiles/cards/options toggle that item’s tag for the selected customer.
-  - **Add customer**: stored locally; also reachable via right-click → **Tag element → Add new customer…**
-  - **Disabled state**: the popup disables controls when the active tab is not a GS4PM URL (must be on `experience.adobe.com` and include `genstudio`).
+1. Open GS4PM in Chrome.
+2. Click the Customer Lens extension icon.
+3. Add one or more customers in **Add customer**.
+4. In **Filter**, choose which customer to show.
+5. In **Tagging**, select a customer and click **Enable tagging**.
+6. Click GS4PM items to add/remove tags for that customer.
+7. Press `Esc` when you want to stop tagging.
 
-- **Workspace bar (bottom overlay, optional)**
-  - Appears at the bottom of the GS4PM page (top frame only).
-  - Provides quick access to: active filter, tagging target, tagging toggle, quick-add customer, and a Hide button.
-  - Designed to stay usable even when tagging mode is enabled (so you can change settings without exiting tagging).
+## How to use each area
 
-## Keyboard shortcuts ⌨️
+### Popup
 
-- **Cycle active filter customer**: `Cmd/Ctrl + K`
-  - Cycles through `All customers` → each customer in your list.
-  - **Reverse direction**: hold **Shift** (`Cmd/Ctrl + Shift + K`).
-  - Shows a small toast with the newly selected filter.
-  - Does not trigger while typing in inputs/textareas/contenteditable fields.
+- **Filter -> Show content for**
+  - Applies your current customer filter immediately.
+- **Tagging -> Tag items for**
+  - Sets the customer used for tagging clicks.
+- **Enable/Disable tagging**
+  - Turns tagging mode on/off.
+- **Add customer**
+  - Stores a new customer name locally in your browser.
+- **GitHub link**
+  - Opens the project repository.
 
-- **Toggle Workspace bar**: `Cmd/Ctrl + Shift + O`
-  - Shows/hides the bottom overlay bar.
+### Workspace bar (optional)
 
-- **Exit tagging mode**: `Esc`
-  - While tagging is enabled, press **Esc** to stop tagging (it broadcasts across frames).
+- Appears on the GS4PM page (top frame).
+- Gives quick controls for filter, tag target, tagging toggle, and quick-add customer.
+- Useful when you want to keep working without reopening the popup.
 
-## Notes & tips 📝
+## Data and scope
 
-- The extension is only active on `experience.adobe.com` URLs that include `genstudio`.
-- GS4PM may render content inside iframes whose own URL does not include `genstudio`; the extension still attaches in those frames if the top-level tab is GS4PM.
-- If you reload the extension, refresh the GS4PM tab to re‑initialize content scripts.
-- Tags are local to your browser profile (not synced between machines).
+- This extension runs only on `experience.adobe.com` URLs that include `genstudio`.
+- GS4PM may render content in iframes; this extension is designed to handle that.
+- Data is stored locally in your browser profile (not synced automatically between machines).
+
+## Troubleshooting
+
+- **Popup controls are disabled**
+  - Make sure the active tab is a GS4PM URL on `experience.adobe.com` that includes `genstudio`.
+- **Tagging/filter changes are not visible**
+  - Refresh the GS4PM page and try again.
+  - If you recently reloaded the extension, refresh the tab after reload.
+- **Right-click menu not appearing**
+  - Right-click directly on a supported GS4PM item and ensure the extension is loaded.
+
+## Project files (quick reference)
+
+- `manifest.json`: Chrome extension configuration
+- `background.js`: context menu and message broadcasting
+- `contentScript.js`: filtering, tagging logic, overlays, workspace bar
+- `popup.html` and `popup.js`: popup interface and controls
+

@@ -70,7 +70,7 @@ let taggingEnabled = false;
 function wireFooter() {
   try {
     const manifest = chrome.runtime.getManifest?.();
-    const homepageUrl = manifest?.homepage_url || 'https://github.com/';
+    const homepageUrl = manifest?.homepage_url || 'https://github.com/AdobeDixon/GSPeM_Customer_Lens';
 
     if (versionText && manifest?.version) {
       versionText.textContent = `v${manifest.version}`;
