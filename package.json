@@ -1,0 +1,14 @@
+{
+  "name": "gspem-demo-extension",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "playwright:bpp-debug": "node scripts/playwright-bpp-debug.mjs",
+    "playwright:bpp-debug:cdp": "PLAYWRIGHT_CONNECT_CDP=1 node scripts/playwright-bpp-debug.mjs",
+    "playwright:bpp-debug:cdp:run": "bash scripts/run-bpp-debug-cdp.sh",
+    "playwright:install-chromium": "playwright install chromium"
+  },
+  "devDependencies": {
+    "playwright": "^1.59.0"
+  }
+}

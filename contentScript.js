@@ -20,6 +20,14 @@ function isGs4pmContext() {
   } catch {
     // Cross-origin: we can't inspect the top URL. Fall back to the frame URL only.
   }
+  // Top-level Experience shell: the address bar may omit `genstudio` while GenStudio lives
+  // in a same-origin iframe. The workspace bar must attach to the top document, so we allow
+  // the script to bootstrap there (manifest already limits host to experience.adobe.com).
+  try {
+    if (window.top === window && location.hostname === GS4PM_HOST) return true;
+  } catch {
+    // ignore
+  }
   return false;
 }
 
@@ -28,6 +36,21 @@ const SHOULD_RUN = isGs4pmContext();
 if (!SHOULD_RUN) {
   console.log('[GS4PM Filter] Skipping non-GS4PM page:', window.location.href);
 } else {
+  const PLUGIN_DISABLED_KEY = 'gs4pm_plugin_disabled';
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes[PLUGIN_DISABLED_KEY]) return;
+    location.reload();
+  });
+
+  chrome.storage.local.get([PLUGIN_DISABLED_KEY], (data) => {
+    if (data[PLUGIN_DISABLED_KEY]) {
+      console.log(
+        '[GS4PM Filter] Customer Lens is off — enable it from the extension icon (right‑click → Enable Customer Lens).'
+      );
+      return;
+    }
+
 let tagging = false;
 let currentTagCustomer = null;
 let hoverHandler = null;
@@ -47,6 +70,10 @@ let targetDropdownHeight = null;
 let dropdownWatchdogInterval = null;
 let dropdownRetryTimeouts = [];
 let dropdownItemObserver = null;
+/** B/P/P listbox: debounced MutationObserver re-applies soft-hide after virtualizer recycles DOM (50–100ms). */
+const BPP_LISTBOX_OBSERVER_DEBOUNCE_MS = 75;
+const GS4PM_BPP_SOFT_HIDE_MARK = 'data-gs4pm-bpp-soft-hide';
+const bppListboxPersistObservers = new WeakMap();
 let isTemporarilyIncreasingHeight = false; // Flag to prevent observer from resetting height during watchdog re-filtering
 let lastTagPointerUpAt = 0;
 
@@ -897,6 +924,18 @@ function ensureWorkspaceBar() {
         const visible = !!data[OVERLAY_VISIBLE_KEY];
         bar.setAttribute('data-hidden', visible ? 'false' : 'true');
 
+        // Playwright / test automation: page context cannot read chrome.storage or isolated extension APIs.
+        // Expose canonical filter + tag UI state on the top-frame overlay root (same values as storage).
+        bar.setAttribute('data-gs4pm-active-filter', active);
+        const tagCustomerAttr =
+          current && current !== '__ALL__' && customers.includes(current)
+            ? current
+            : active !== 'ALL'
+              ? active
+              : '';
+        bar.setAttribute('data-gs4pm-tag-customer', tagCustomerAttr || '');
+        bar.setAttribute('data-gs4pm-tagging-enabled', data[TAGGING_ENABLED_KEY] ? 'true' : 'false');
+
         // If the Esc banner exists, re-position it so it doesn't overlap the bar/menu.
         if (document.getElementById(TAGGING_BANNER_ID)) {
           positionTaggingBanner();
@@ -1022,10 +1061,422 @@ function cssEscapeAttrValue(value) {
 
 function extractAttrFromSelector(selector, attrName) {
   if (!selector) return null;
-  // e.g. [data-item-id="urn:..."]
-  const re = new RegExp(`\\[\\s*${attrName}\\s*=\\s*["']([^"']+)["']\\s*\\]`);
+  // e.g. [data-item-id="urn:..."] — escape attr name for regex (hyphens, dots in data-* names)
+  const esc = String(attrName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`\\[\\s*${esc}\\s*=\\s*["']([^"']+)["']\\s*\\]`);
   const match = selector.match(re);
   return match ? match[1] : null;
+}
+
+/** UUID segment for loose matching when tag selectors use a different URN prefix than listbox data-key. */
+function extractUuidLikeFromEntityId(s) {
+  if (!s) return null;
+  const m = String(s).match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  return m ? m[0].toLowerCase() : null;
+}
+
+function entityIdsMatchLoosely(a, b) {
+  if (a == null || b == null) return false;
+  const sa = String(a).trim();
+  const sb = String(b).trim();
+  if (sa === sb) return true;
+  if (!sa || !sb) return false;
+  const ua = extractUuidLikeFromEntityId(sa);
+  const ub = extractUuidLikeFromEntityId(sb);
+  if (ua && ub && ua === ub) return true;
+  const la = sa.toLowerCase();
+  const lb = sb.toLowerCase();
+  if (la.length > 24 && lb.length > 24 && (la.includes(lb) || lb.includes(la))) return true;
+  return false;
+}
+
+const DROPDOWN_IDENTITY_ATTRS = [
+  'data-key',
+  'data-omega-attribute-referenceid',
+  'data-item-id',
+  'data-omega-attribute-contentid',
+];
+
+/** Option + row wrapper — tags from grids often use data-item-id while listbox uses data-key for the same id. */
+function getOptionIdentityKeys(option) {
+  const keys = new Set();
+  if (!(option instanceof Element)) return keys;
+  const add = (el) => {
+    if (!(el instanceof Element)) return;
+    for (const attr of DROPDOWN_IDENTITY_ATTRS) {
+      const v = el.getAttribute(attr);
+      if (v && String(v).trim()) keys.add(String(v).trim());
+    }
+  };
+  add(option);
+  add(option.parentElement);
+  return keys;
+}
+
+/**
+ * Unified identity for create-flow B/P/P options: listbox may expose data-key while tags use
+ * data-item-id for the same entity. Tag matching uses getOptionIdentityKeys + dropdownOptionMatchesTag;
+ * this returns a stable primary key for dedupe/logging.
+ */
+function resolveDropdownOptionIdentity(option) {
+  if (!(option instanceof Element)) return { primary: '', keys: [] };
+  const keys = getOptionIdentityKeys(option);
+  const primary =
+    option.getAttribute('data-key') ||
+    option.getAttribute('data-item-id') ||
+    option.getAttribute('data-omega-attribute-referenceid') ||
+    option.getAttribute('data-omega-attribute-contentid') ||
+    (keys.size ? [...keys][0] : '') ||
+    '';
+  const trimmed = String(primary).trim();
+  const fallback = (option.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  return { primary: trimmed || fallback, keys: Array.from(keys) };
+}
+
+function addNormalizedDropdownIdentityVariants(targetSet, rawValue) {
+  if (!targetSet || rawValue == null) return;
+  const trimmed = String(rawValue).trim();
+  if (!trimmed) return;
+  targetSet.add(trimmed);
+  targetSet.add(trimmed.toLowerCase());
+  const uuid = extractUuidLikeFromEntityId(trimmed);
+  if (uuid) targetSet.add(uuid);
+}
+
+function getOptionNormalizedIdentityKeys(option) {
+  const out = new Set();
+  const { primary, keys } = resolveDropdownOptionIdentity(option);
+  addNormalizedDropdownIdentityVariants(out, primary);
+  (keys || []).forEach((k) => addNormalizedDropdownIdentityVariants(out, k));
+  return out;
+}
+
+function getDropdownRowIdentityKey(entry) {
+  if (!entry?.option) return '';
+  const { primary } = resolveDropdownOptionIdentity(entry.option);
+  return primary;
+}
+
+function normalizeDropdownOptionLabel(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function extractTextCandidatesForTagMatch(el) {
+  const values = new Set();
+  const addText = (text) => {
+    const normalized = normalizeDropdownOptionLabel(text);
+    if (normalized && normalized.length <= 120) values.add(normalized);
+  };
+  const collectFrom = (node) => {
+    if (!(node instanceof Element)) return;
+    addText(node.textContent || '');
+    try {
+      (node.innerText || '')
+        .split('\n')
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .forEach(addText);
+    } catch (e) {}
+    node.querySelectorAll('h1,h2,h3,h4,h5,h6,[role="heading"],[data-testid*="title"],[class*="title"],[class*="label"]').forEach((child) => {
+      addText(child.textContent || '');
+    });
+  };
+  collectFrom(el);
+  collectFrom(el.closest('[data-key], [data-item-id], article, [role="option"], [role="row"]'));
+  return values;
+}
+
+function isMeaningfulListboxOption(option) {
+  if (!(option instanceof Element)) return false;
+  if (
+    option.getAttribute('data-key') ||
+    option.getAttribute('data-item-id') ||
+    option.getAttribute('data-omega-attribute-referenceid') ||
+    option.getAttribute('data-omega-attribute-contentid')
+  ) {
+    return true;
+  }
+  const t = (option.textContent || '').replace(/\s+/g, ' ').trim();
+  return t.length > 0;
+}
+
+/** Virtualized menus can mount the same entity in multiple [role=presentation] slots; filter once per id. */
+function getOptionDedupeKey(option) {
+  return resolveDropdownOptionIdentity(option).primary;
+}
+
+function dedupeDropdownRowsByOptionIdentity(rows) {
+  if (!rows || rows.length < 2) return rows;
+  const byKey = new Map();
+  const noKey = [];
+  for (const entry of rows) {
+    const opt = entry.option;
+    if (!(opt instanceof Element)) continue;
+    const key = getOptionDedupeKey(opt);
+    if (!key) {
+      noKey.push(entry);
+      continue;
+    }
+    byKey.set(key, entry);
+  }
+  const sortByVirtualTop = (a, b) => {
+    const at = parseInt(a.row?.dataset?.gs4pmOrigTop || a.row?.style?.top || '', 10) || 0;
+    const bt = parseInt(b.row?.dataset?.gs4pmOrigTop || b.row?.style?.top || '', 10) || 0;
+    return at - bt;
+  };
+  const deduped = [...byKey.values()].sort(sortByVirtualTop);
+  noKey.sort(sortByVirtualTop);
+  return [...deduped, ...noKey];
+}
+
+/**
+ * Tags are often stored from card/article selectors; dropdown options share ids via data-key / referenceid.
+ * Only compare ids on the option and its immediate row wrapper — `closest()` past the row can hit
+ * listbox/popover nodes or wrong rows under virtualization and cause false "other customer" matches.
+ */
+function dropdownOptionMatchesTag(option, tag) {
+  if (!(option instanceof Element) || !tag || !tag.selector) return false;
+  const raw = tag.selector.trim();
+  const branches = raw.includes(',')
+    ? raw.split(',').map((s) => s.trim()).filter(Boolean)
+    : [raw];
+
+  const identityKeys = getOptionIdentityKeys(option);
+  if (identityKeys.size) {
+    for (const branch of branches) {
+      for (const attr of DROPDOWN_IDENTITY_ATTRS) {
+        const fromTag = extractAttrFromSelector(branch, attr);
+        if (!fromTag) continue;
+        const ft = fromTag.trim();
+        if (identityKeys.has(ft)) return true;
+        for (const ik of identityKeys) {
+          if (entityIdsMatchLoosely(ft, ik)) return true;
+        }
+      }
+    }
+  }
+
+  for (const branch of branches) {
+    try {
+      if (option.matches(branch)) return true;
+    } catch (e) {
+      /* ignore invalid branch */
+    }
+  }
+
+  const rowEl = option.parentElement;
+  for (const branch of branches) {
+    for (const attr of DROPDOWN_IDENTITY_ATTRS) {
+      const fromTag = extractAttrFromSelector(branch, attr);
+      if (!fromTag) continue;
+      const ov = option.getAttribute(attr);
+      const rv = rowEl && rowEl.getAttribute ? rowEl.getAttribute(attr) : null;
+      if (ov === fromTag || rv === fromTag) return true;
+      if (ov && entityIdsMatchLoosely(fromTag, ov)) return true;
+      if (rv && entityIdsMatchLoosely(fromTag, rv)) return true;
+    }
+  }
+  return false;
+}
+
+/** Classify a single option against the tag store (same rules as B/P/P filter pass). */
+function classifyBppOptionForCustomerFilter(option, tags, activeCustomer) {
+  let isTaggedToCurrent = false;
+  let isTaggedToOther = false;
+  let matchesAnyStoredTag = false;
+  if (!tags || !tags.length || !activeCustomer || activeCustomer === 'ALL') {
+    return { shouldHide: false, isTaggedToCurrent: false, isTaggedToOther: false, matchesAnyStoredTag: false };
+  }
+  for (const tag of tags) {
+    try {
+      if (dropdownOptionMatchesTag(option, tag)) {
+        matchesAnyStoredTag = true;
+        if (tag.customer === activeCustomer) isTaggedToCurrent = true;
+        else isTaggedToOther = true;
+      }
+    } catch (e) {
+      /* invalid selector */
+    }
+  }
+  const shouldHide = isTaggedToOther && !isTaggedToCurrent;
+  return { shouldHide, isTaggedToCurrent, isTaggedToOther, matchesAnyStoredTag };
+}
+
+function extractIdentityValuesFromSelector(selector) {
+  const values = new Set();
+  if (!selector) return values;
+  const branches = selector.includes(',')
+    ? selector.split(',').map((s) => s.trim()).filter(Boolean)
+    : [selector.trim()];
+  branches.forEach((branch) => {
+    DROPDOWN_IDENTITY_ATTRS.forEach((attr) => {
+      const v = extractAttrFromSelector(branch, attr);
+      if (v) addNormalizedDropdownIdentityVariants(values, v);
+    });
+  });
+  return values;
+}
+
+function getElementIdentityValues(el) {
+  const values = new Set();
+  if (!(el instanceof Element)) return values;
+  addNormalizedDropdownIdentityVariants(values, el.getAttribute('data-key'));
+  addNormalizedDropdownIdentityVariants(values, el.getAttribute('data-item-id'));
+  addNormalizedDropdownIdentityVariants(values, el.getAttribute('data-omega-attribute-referenceid'));
+  addNormalizedDropdownIdentityVariants(values, el.getAttribute('data-omega-attribute-contentid'));
+  return values;
+}
+
+/**
+ * Build a host-page identity index once per filter pass so dropdown rows can be decided by key lookup
+ * instead of repeatedly re-matching every selector against every recycled DOM row.
+ */
+function buildCreateFlowTagIdentityIndex(tags) {
+  const index = new Map();
+  const add = (value, customer) => {
+    if (!customer) return;
+    if (!index.has(value)) index.set(value, new Set());
+    index.get(value).add(customer);
+  };
+  (tags || []).forEach((tag) => {
+    if (!tag?.selector || !tag.customer) return;
+    const directValues = extractIdentityValuesFromSelector(tag.selector);
+    directValues.forEach((value) => add(value, tag.customer));
+
+    // Fallback for selectors that point at cards/tiles and require DOM resolution to reveal a shared id.
+    if (directValues.size > 0) return;
+    try {
+      Array.from(document.querySelectorAll(tag.selector)).forEach((el) => {
+        if (!(el instanceof Element)) return;
+        const identityNodes = [
+          el,
+          el.closest('[data-key]'),
+          el.closest('[data-item-id]'),
+          el.closest('[data-omega-attribute-referenceid]'),
+          el.closest('[data-omega-attribute-contentid]'),
+        ].filter(Boolean);
+        identityNodes.forEach((node) => {
+          getElementIdentityValues(node).forEach((value) => add(value, tag.customer));
+        });
+      });
+    } catch (e) {
+      /* ignore invalid selector */
+    }
+  });
+  return index;
+}
+
+function buildCreateFlowTagTextIndex(tags) {
+  const index = new Map();
+  const add = (value, customer) => {
+    if (!value || !customer) return;
+    if (!index.has(value)) index.set(value, new Set());
+    index.get(value).add(customer);
+  };
+  (tags || []).forEach((tag) => {
+    if (!tag?.selector || !tag.customer) return;
+    try {
+      Array.from(document.querySelectorAll(tag.selector)).forEach((el) => {
+        if (!(el instanceof Element)) return;
+        extractTextCandidatesForTagMatch(el).forEach((text) => add(text, tag.customer));
+      });
+    } catch (e) {
+      /* ignore invalid selector */
+    }
+  });
+  return index;
+}
+
+function buildBppDropdownDecisionMap(dropdownRows, tags, activeCustomer, kind) {
+  const identityIndex = buildCreateFlowTagIdentityIndex(tags);
+  const textIndex = kind === 'brand' ? buildCreateFlowTagTextIndex(tags) : null;
+  const decisions = new Map();
+  let noTagMatchCount = 0;
+  let hiddenIdentityCount = 0;
+
+  (dropdownRows || []).forEach((entry) => {
+    const option = entry?.option;
+    if (!(option instanceof Element)) return;
+    const identityKey = getDropdownRowIdentityKey(entry);
+    if (!identityKey || decisions.has(identityKey)) return;
+
+    const matchedCustomers = new Set();
+    getOptionNormalizedIdentityKeys(option).forEach((token) => {
+      const customers = identityIndex.get(token);
+      if (!customers) return;
+      customers.forEach((customer) => matchedCustomers.add(customer));
+    });
+    if (matchedCustomers.size === 0 && textIndex) {
+      const labelCustomers = textIndex.get(normalizeDropdownOptionLabel(option.textContent || ''));
+      if (labelCustomers) labelCustomers.forEach((customer) => matchedCustomers.add(customer));
+    }
+
+    let matchesAnyStoredTag = matchedCustomers.size > 0;
+    let isTaggedToCurrent = matchedCustomers.has(activeCustomer);
+    let isTaggedToOther = Array.from(matchedCustomers).some((customer) => customer !== activeCustomer);
+
+    // Fallback for selectors that don't expose a stable attr in storage yet.
+    if (!matchesAnyStoredTag) {
+      const fallback = classifyBppOptionForCustomerFilter(option, tags, activeCustomer);
+      matchesAnyStoredTag = fallback.matchesAnyStoredTag;
+      isTaggedToCurrent = fallback.isTaggedToCurrent;
+      isTaggedToOther = fallback.isTaggedToOther;
+    }
+
+    if (!matchesAnyStoredTag) noTagMatchCount++;
+    const shouldHide = isTaggedToOther && !isTaggedToCurrent;
+    if (shouldHide) hiddenIdentityCount++;
+    decisions.set(identityKey, {
+      shouldHide,
+      matchesAnyStoredTag,
+      isTaggedToCurrent,
+      isTaggedToOther,
+    });
+  });
+
+  // Brand fallback: in this workflow, brand labels can directly equal customer names even when
+  // selectors/data-key identities don't line up. If *nothing* matched, fall back to customer-label rules.
+  if (kind === 'brand' && decisions.size > 0 && noTagMatchCount === decisions.size) {
+    const customerNames = new Set((tags || []).map((t) => normalizeDropdownOptionLabel(t?.customer || '')).filter(Boolean));
+    const activeName = normalizeDropdownOptionLabel(activeCustomer);
+    const optionLabels = new Set(
+      (dropdownRows || [])
+        .map((entry) => normalizeDropdownOptionLabel(entry?.option?.textContent || ''))
+        .filter(Boolean)
+    );
+    noTagMatchCount = 0;
+    hiddenIdentityCount = 0;
+    decisions.clear();
+    (dropdownRows || []).forEach((entry) => {
+      const option = entry?.option;
+      if (!(option instanceof Element)) return;
+      const identityKey = getDropdownRowIdentityKey(entry);
+      if (!identityKey || decisions.has(identityKey)) return;
+      const label = normalizeDropdownOptionLabel(option.textContent || '');
+      const activeCustomerAppearsAsOption = optionLabels.has(activeName);
+      const matchesKnownCustomer = customerNames.has(label);
+      // If the active customer is literally present as a brand option, show only that label.
+      // Otherwise fall back to any customer-name labels we can infer.
+      const matchesAnyStoredTag = activeCustomerAppearsAsOption ? label === activeName : matchesKnownCustomer;
+      const isTaggedToCurrent = activeCustomerAppearsAsOption ? label === activeName : (matchesKnownCustomer && label === activeName);
+      const isTaggedToOther = activeCustomerAppearsAsOption ? (label !== activeName) : (matchesKnownCustomer && label !== activeName);
+      if (!matchesAnyStoredTag) noTagMatchCount++;
+      const shouldHide = isTaggedToOther && !isTaggedToCurrent;
+      if (shouldHide) hiddenIdentityCount++;
+      decisions.set(identityKey, {
+        shouldHide,
+        matchesAnyStoredTag,
+        isTaggedToCurrent,
+        isTaggedToOther,
+      });
+    });
+  }
+
+  return {
+    decisions,
+    noTagMatchCount,
+    hiddenIdentityCount,
+  };
 }
 
 function inferListboxTotalOptionCount(listboxEl) {
@@ -1058,6 +1509,9 @@ function updateAssetsCssFilter(activeCustomer, tags) {
   // Remove style when showing ALL
   if (!activeCustomer || activeCustomer === 'ALL') {
     if (styleEl) styleEl.remove();
+    try {
+      restoreMosaicGridLayout(getContentAssetsMosaicContainers());
+    } catch (e) {}
     return;
   }
 
@@ -1105,6 +1559,8 @@ function updateAssetsCssFilter(activeCustomer, tags) {
     document.head.appendChild(styleEl);
   }
   styleEl.textContent = css;
+  // display:none on virtualized tiles breaks left/top when tiles remount; reflow after paint.
+  scheduleContentAssetsGridReflow();
 }
 
 // ===== Templates CSS filtering (no flicker on scroll) =====
@@ -1579,6 +2035,82 @@ function getDisplayContainer(el) {
   return el;
 }
 
+/** Absolute mosaic tile roots on Content/Assets (same heuristics as applyFilter grid cards). */
+function getContentAssetsMosaicContainers() {
+  const out = [];
+  document.querySelectorAll('div[style*="position: absolute"]').forEach(div => {
+    const role = div.getAttribute('role');
+    const isPresentation = role === 'presentation';
+    const insideListbox = div.closest('[role="listbox"]') !== null;
+    const insidePopover = div.closest('[role="presentation"][data-testid="popover"]') !== null;
+    const hasPopoverClass = div.className && div.className.includes('Popover');
+    const insidePopoverClass = div.closest('[class*="Popover"]') !== null;
+    if (isPresentation && insideListbox) return;
+    if (role === 'listbox' || div.querySelector('[role="listbox"]') || insidePopover || hasPopoverClass || insidePopoverClass) {
+      return;
+    }
+    if (
+      div.querySelector('article') ||
+      div.querySelector('[data-test-id^="library-grid-mosaic-card-"]')
+    ) {
+      out.push(div);
+    }
+  });
+  return out;
+}
+
+function restoreMosaicGridLayout(containers) {
+  if (!containers || containers.length === 0) return;
+  const parent = containers[0].parentElement;
+  containers.forEach(container => {
+    if (!(container instanceof Element)) return;
+    if (container.dataset.gs4pmOrigLeft !== undefined) {
+      container.style.left = container.dataset.gs4pmOrigLeft;
+      container.style.top = container.dataset.gs4pmOrigTop;
+      container.style.display = '';
+      delete container.dataset.gs4pmOrigLeft;
+      delete container.dataset.gs4pmOrigTop;
+      delete container.dataset.gs4pmHidden;
+    }
+  });
+  if (parent && parent.dataset.gs4pmOrigHeight !== undefined) {
+    parent.style.height = parent.dataset.gs4pmOrigHeight;
+    delete parent.dataset.gs4pmOrigHeight;
+  }
+}
+
+function reflowContentAssetsMosaicGrid() {
+  if (!isContentAssetsPage()) return;
+  if (!currentFilterCustomer || currentFilterCustomer === 'ALL') return;
+  const all = getContentAssetsMosaicContainers();
+  if (all.length === 0) return;
+  const visible = [];
+  const hidden = [];
+  all.forEach(c => {
+    const cs = window.getComputedStyle(c);
+    if (cs.display === 'none' || cs.visibility === 'hidden') hidden.push(c);
+    else visible.push(c);
+  });
+  if (visible.length === 0) return;
+  reorderVirtualizedGrid(visible, hidden);
+}
+
+let contentAssetsGridReflowScheduled = false;
+function scheduleContentAssetsGridReflow() {
+  if (contentAssetsGridReflowScheduled) return;
+  if (!isContentAssetsPage()) return;
+  if (!currentFilterCustomer || currentFilterCustomer === 'ALL') return;
+  contentAssetsGridReflowScheduled = true;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      contentAssetsGridReflowScheduled = false;
+      try {
+        reflowContentAssetsMosaicGrid();
+      } catch (e) {}
+    });
+  });
+}
+
 // ===== Badge helpers =====
 
 const BADGE_ATTR = 'data-gs4pm-badge';
@@ -1794,6 +2326,16 @@ function reorderVirtualizedGrid(visibleContainers, hiddenContainers) {
   });
   
   if (safeVisible.length === 0) return;
+
+  // Preserve visual reading order; array order from querySelector/Set is not grid order.
+  safeVisible.sort((a, b) => {
+    const at = parseFloat(a.style.top) || 0;
+    const bt = parseFloat(b.style.top) || 0;
+    if (Math.abs(at - bt) > 8) return at - bt;
+    const al = parseFloat(a.style.left) || 0;
+    const bl = parseFloat(b.style.left) || 0;
+    return al - bl;
+  });
   
   // Get parent container
   const parent = safeVisible[0].parentElement;
@@ -1801,14 +2343,24 @@ function reorderVirtualizedGrid(visibleContainers, hiddenContainers) {
   
   console.log('[GS4PM Filter] Reordering grid:', safeVisible.length, 'visible,', safeHidden.length, 'hidden (filtered from', visibleContainers.length, '+', hiddenContainers.length, ')');
   
-  // Detect grid parameters from ALL containers (visible + hidden)
+  function metricsFor(c) {
+    const left = parseFloat(c.dataset.gs4pmOrigLeft || c.style.left) || 0;
+    const top = parseFloat(c.dataset.gs4pmOrigTop || c.style.top) || 0;
+    const cs = window.getComputedStyle(c);
+    const width = parseFloat(cs.width) || 0;
+    const height = parseFloat(cs.height) || 0;
+    return { left, top, width, height };
+  }
+
+  // Prefer laid-out tiles only (display:none yields 0×0 and breaks column/row math).
   const allContainers = [...safeVisible, ...safeHidden];
-  const positions = allContainers.map(c => ({
-    left: parseFloat(c.dataset.gs4pmOrigLeft || c.style.left) || 0,
-    top: parseFloat(c.dataset.gs4pmOrigTop || c.style.top) || 0,
-    width: parseFloat(window.getComputedStyle(c).width) || 0,
-    height: parseFloat(window.getComputedStyle(c).height) || 0
-  })).filter(p => p.left >= 0 && p.top >= 0); // Filter out already off-screen items
+  let layoutSources = allContainers.filter(c => {
+    const cs = window.getComputedStyle(c);
+    return cs.display !== 'none' && cs.visibility !== 'hidden';
+  });
+  if (layoutSources.length === 0) layoutSources = safeVisible;
+
+  const positions = layoutSources.map(c => metricsFor(c)).filter(p => p.left >= 0 && p.top >= 0 && (p.width > 0 || p.height > 0));
   
   if (positions.length === 0) return;
   
@@ -1825,16 +2377,19 @@ function reorderVirtualizedGrid(visibleContainers, hiddenContainers) {
     ? Math.min(...firstRowItems.slice(1).map((p, i) => p.left - firstRowItems[i].left))
     : positions[0].width + 24;
   
-  // Find row height (smallest vertical gap)
-  const rowHeight = positions.length > 1
-    ? positions.slice(1).reduce((min, p, i) => {
-        const gap = p.top - positions[i].top;
-        return gap > 10 && gap < min ? gap : min;
-      }, positions[0].height + 24)
-    : positions[0].height + 24;
+  // Row step: minimum vertical delta between rows (ignore horizontal neighbors on the same row).
+  let rowHeight = positions[0].height + 24;
+  if (positions.length > 1) {
+    let minRowStep = Infinity;
+    for (let i = 1; i < positions.length; i++) {
+      const dy = positions[i].top - positions[i - 1].top;
+      if (dy > 10) minRowStep = Math.min(minRowStep, dy);
+    }
+    if (minRowStep < Infinity) rowHeight = minRowStep;
+  }
   
   // Detect columns per row
-  const columnsPerRow = firstRowItems.length;
+  const columnsPerRow = Math.max(1, firstRowItems.length);
   
   console.log('[GS4PM Filter] Grid params: columnWidth=' + columnWidth + 'px, rowHeight=' + rowHeight + 'px, columns=' + columnsPerRow);
   
@@ -1928,6 +2483,11 @@ function reorderVirtualizedDropdown(visibleWrappers, hiddenWrappers) {
   const parent = allWrappers[0].parentElement;
   if (!parent) {
     console.log('[GS4PM Filter] ERROR: No parent element found for dropdown wrappers');
+    return;
+  }
+  const listboxEl = parent.closest('[role="listbox"]') || parent.parentElement;
+  if (isCreateFlowBrandProductPersonaListbox(listboxEl)) {
+    console.log('[GS4PM Filter] Skipping legacy reorderVirtualizedDropdown for create-flow B/P/P listbox');
     return;
   }
   
@@ -2118,12 +2678,8 @@ function reorderVirtualizedDropdown(visibleWrappers, hiddenWrappers) {
     console.log('[GS4PM Filter] ⚠️ Height calculation mismatch: calculated=' + lastItemTop + 'px, actual style=' + actualLastItemTop + 'px');
   }
   
-  // CRITICAL: Add a buffer to prevent React from removing items due to rounding/subpixel issues
-  // React's virtualization can be very aggressive and will remove items if the container is even slightly too small
-  // Increased buffer to 24px to be VERY conservative (React needs extra space to not remove items)
-  // This ensures we have plenty of room for all items
-  // Also round up to nearest pixel to avoid subpixel issues
-  const heightBuffer = 24;
+  // Small buffer for subpixel / React; large buffers read as an empty strip at the bottom of the menu.
+  const heightBuffer = 4;
   
   // Also account for any bottom padding/borders
   const newHeight = lastItemBottom + parentPaddingBottom + parentBorderBottom + heightBuffer;
@@ -2302,7 +2858,7 @@ function reorderVirtualizedDropdown(visibleWrappers, hiddenWrappers) {
   // Final verification: Check if last item is actually visible (multiple checks with increasing delays)
   const checkVisibility = (delay, checkNumber) => {
     setTimeout(() => {
-      if (!document.body.contains(parent)) return; // Dropdown closed
+      if (!parent.isConnected) return; // Dropdown closed (use isConnected: listbox may live in another frame)
       
       if (sortedVisible.length > 0) {
         const lastItem = sortedVisible[sortedVisible.length - 1];
@@ -2423,7 +2979,7 @@ function reorderVirtualizedDropdown(visibleWrappers, hiddenWrappers) {
   
   // Add a watchdog to check if elements are still in the DOM AND continuously fix heights
   dropdownWatchdogInterval = setInterval(() => {
-    if (!document.body.contains(parent)) {
+    if (!parent.isConnected) {
       console.log('[GS4PM Filter] 🛑 Dropdown removed from DOM, disconnecting observer');
       clearInterval(dropdownWatchdogInterval);
       dropdownWatchdogInterval = null;
@@ -2436,6 +2992,11 @@ function reorderVirtualizedDropdown(visibleWrappers, hiddenWrappers) {
       if (dropdownItemObserver) {
         dropdownItemObserver.disconnect();
         dropdownItemObserver = null;
+      }
+
+      const lbFromParent = parent?.parentElement;
+      if (lbFromParent && lbFromParent.getAttribute('role') === 'listbox') {
+        teardownBppListboxPersistObserver(lbFromParent);
       }
       
       if (dropdownHeightObserver) {
@@ -2500,12 +3061,12 @@ function reorderVirtualizedDropdown(visibleWrappers, hiddenWrappers) {
         const lastItem = freshWrappers[freshWrappers.length - 1];
         
         // Check if last item still exists in DOM (React might remove it)
-        if (!document.body.contains(lastItem)) {
+        if (!lastItem.isConnected) {
           console.log('[GS4PM Filter] ⚠️ Watchdog: Last item removed from DOM! Re-filtering...');
           // Item was removed - React's virtualization removed it because container was too small
           // Re-query wrappers and re-filter
           const listboxContainer = parent.closest('[role="listbox"]') || parent.parentElement;
-          if (listboxContainer && document.body.contains(listboxContainer)) {
+          if (listboxContainer && listboxContainer.isConnected) {
             console.log('[GS4PM Filter] 🔄 Re-triggering dropdown filter...');
             // Set flag to prevent observer from resetting height
             isTemporarilyIncreasingHeight = true;
@@ -2525,7 +3086,7 @@ function reorderVirtualizedDropdown(visibleWrappers, hiddenWrappers) {
             
             // Wait a bit for React to render, then re-filter
             setTimeout(() => {
-              if (document.body.contains(listboxContainer)) {
+              if (listboxContainer.isConnected) {
                 // Re-query and re-filter
                 applyFilterToNode(listboxContainer);
                 // Reset flag after re-filtering starts (it will set new targetDropdownHeight)
@@ -2665,6 +3226,9 @@ function restoreVirtualizedDropdown(wrappers) {
   const parent = wrappers[0].parentElement;
   
   wrappers.forEach(wrapper => {
+    if (wrapper.getAttribute(GS4PM_BPP_SOFT_HIDE_MARK) === '1') {
+      clearBppSoftHidePresentationRow(wrapper);
+    }
     // Restore display and position
     wrapper.style.display = '';
     if (wrapper.dataset.gs4pmOrigTop) {
@@ -2681,6 +3245,9 @@ function restoreVirtualizedDropdown(wrappers) {
     parent.style.maxHeight = '';
     parent.style.overflow = '';
     delete parent.dataset.gs4pmOrigHeight;
+  }
+  if (parent) {
+    delete parent.dataset.gs4pmObserverActive;
   }
   
   // Restore listbox height
@@ -2839,7 +3406,9 @@ function applyFilter(activeCustomer) {
         c.querySelector('article') !== null || c.querySelector('[data-test-id^="library-grid-mosaic-card-"]') !== null
       );
       const dropdownWrappers = Array.from(allContainers).filter(c => 
-        c.getAttribute('role') === 'presentation' && c.querySelector('[role="option"]')
+        c.getAttribute('role') === 'presentation' &&
+        c.querySelector('[role="option"]') &&
+        !isCreateFlowDropdownRow(c)
       );
       
       // Restore grid to original layout
@@ -2906,7 +3475,9 @@ function applyFilter(activeCustomer) {
     // Apply filtering
     // Separate dropdown wrappers from grid cards
     const dropdownWrappers = absoluteContainers.filter(c => 
-      c.getAttribute('role') === 'presentation' && c.querySelector('[role="option"]')
+      c.getAttribute('role') === 'presentation' &&
+      c.querySelector('[role="option"]') &&
+      !isCreateFlowDropdownRow(c)
     );
     const gridCards = absoluteContainers.filter(c => !dropdownWrappers.includes(c));
     
@@ -2974,13 +3545,1215 @@ function applyFilter(activeCustomer) {
 let pendingDropdownFilter = null;
 // Track which listboxes are currently being filtered to prevent duplicate operations
 const filteringListboxes = new WeakSet();
+/** Must match collectDropdownRows: React often sets position:absolute via stylesheet, not inline style. */
+function isVirtualizedPresentationRow(row) {
+  if (!(row instanceof Element)) return false;
+  if (row.getAttribute('role') !== 'presentation') return false;
+  if (row.style.position === 'absolute') return true;
+  try {
+    return window.getComputedStyle(row).position === 'absolute';
+  } catch (e) {
+    return false;
+  }
+}
+
+function clearReleaseFilteringTimer(listboxEl) {
+  if (!(listboxEl instanceof Element)) return;
+  if (listboxEl._gs4pmReleaseFilterTimer) {
+    clearTimeout(listboxEl._gs4pmReleaseFilterTimer);
+    delete listboxEl._gs4pmReleaseFilterTimer;
+  }
+}
+
+/** Delay WeakSet release so DOM mutations from our own layout don't immediately re-enter applyFilterToNode (spam + attempt-1 loops). */
+function scheduleReleaseFilteringListbox(listboxEl) {
+  if (!(listboxEl instanceof Element)) return;
+  clearReleaseFilteringTimer(listboxEl);
+  listboxEl._gs4pmReleaseFilterTimer = setTimeout(() => {
+    delete listboxEl._gs4pmReleaseFilterTimer;
+    filteringListboxes.delete(listboxEl);
+  }, 420);
+}
+
+const OMEGA_COMBO_INPUT_SEL =
+  'input[data-omega-element="brand-select"],' +
+  'input[data-omega-element="product-select"],' +
+  'input[data-omega-element="persona-select"]';
+
+/**
+ * content_scripts run with all_frames=true. The open [role=listbox] is often portaled into
+ * window.top.document while Brand/Product/Persona inputs live inside an iframe — so queries
+ * limited to `document` never see both. Collect same-origin documents from the top window down.
+ */
+function collectSameOriginDocuments(rootDoc) {
+  const out = [];
+  const seen = new Set();
+  function walk(doc) {
+    if (!doc || seen.has(doc)) return;
+    seen.add(doc);
+    out.push(doc);
+    let iframes;
+    try {
+      iframes = doc.querySelectorAll('iframe');
+    } catch (e) {
+      return;
+    }
+    iframes.forEach((frame) => {
+      try {
+        const child = frame.contentDocument;
+        if (child) walk(child);
+      } catch (e) {
+        /* cross-origin */
+      }
+    });
+  }
+  try {
+    walk(rootDoc);
+  } catch (e) {}
+  return out;
+}
+
+function getAllGs4pmDocumentsForComboSearch() {
+  let root = document;
+  try {
+    if (window.top && window.top.document) root = window.top.document;
+  } catch (e) {
+    /* cross-origin top */
+  }
+  return collectSameOriginDocuments(root);
+}
+
+function queryAllDocs(selector, rootList) {
+  const nodes = [];
+  (rootList || [document]).forEach((doc) => {
+    try {
+      doc.querySelectorAll(selector).forEach((el) => nodes.push(el));
+    } catch (e) {}
+  });
+  return nodes;
+}
+
+function queryOneDocFirst(selector, rootList) {
+  for (const doc of rootList || [document]) {
+    try {
+      const el = doc.querySelector(selector);
+      if (el) return el;
+    } catch (e) {}
+  }
+  return null;
+}
+
+/**
+ * Resolves the Brand / Product / Persona combobox input for an open listbox.
+ * Must search all same-origin frames — listbox and inputs are often in different documents.
+ */
+function findOmegaComboInputForListbox(listboxEl) {
+  if (!(listboxEl instanceof Element)) return null;
+  const listboxId = listboxEl.getAttribute('id');
+  const docs = getAllGs4pmDocumentsForComboSearch();
+
+  const matchesListbox = (inp) => {
+    if (!(inp instanceof Element) || !listboxId) return false;
+    const ac = inp.getAttribute('aria-controls');
+    if (!ac) return false;
+    return ac === listboxId || ac.trim() === listboxId;
+  };
+
+  // 1) Listbox id ↔ input[aria-controls] (any frame)
+  if (listboxId) {
+    const escaped = cssEscapeAttrValue(listboxId);
+    // Only Brand / Product / Persona — do not match language-select (same popover pattern).
+    const direct = queryOneDocFirst(
+      `input[data-omega-element="brand-select"][aria-controls="${escaped}"],` +
+        `input[data-omega-element="product-select"][aria-controls="${escaped}"],` +
+        `input[data-omega-element="persona-select"][aria-controls="${escaped}"]`,
+      docs
+    );
+    if (direct instanceof Element) return direct;
+    for (const n of queryAllDocs(OMEGA_COMBO_INPUT_SEL, docs)) {
+      if (matchesListbox(n)) return n;
+    }
+    // Any element (e.g. trigger) that points at this listbox — then find sibling omega input in same doc
+    for (const doc of docs) {
+      try {
+        const byControls = doc.querySelector(`[aria-controls="${escaped}"]`);
+        if (byControls instanceof Element) {
+          const inWidget = byControls.closest('[data-omega-widget="generate-content-prompt"]');
+          if (inWidget) {
+            for (const sel of ['brand-select', 'product-select', 'persona-select']) {
+              const omega = inWidget.querySelector(`input[data-omega-element="${sel}"]`);
+              if (omega instanceof Element) return omega;
+            }
+          }
+        }
+      } catch (e) {}
+    }
+  }
+
+  // 2) Single expanded combobox in the entire tree (popover portaled away from inputs)
+  const expandedOpen = queryAllDocs(OMEGA_COMBO_INPUT_SEL, docs).filter(
+    (inp) => inp.getAttribute('aria-expanded') === 'true'
+  );
+  if (expandedOpen.length === 1) {
+    const inp = expandedOpen[0];
+    const ac = inp.getAttribute('aria-controls');
+    if (!listboxId || !ac || ac === listboxId || ac.trim() === listboxId) {
+      return inp;
+    }
+  }
+  if (expandedOpen.length > 1 && listboxId) {
+    for (const inp of expandedOpen) {
+      const ac = inp.getAttribute('aria-controls');
+      if (ac && (ac === listboxId || ac.trim() === listboxId)) return inp;
+    }
+  }
+
+  const widget = listboxEl.closest('[data-omega-widget="generate-content-prompt"]');
+  if (widget && listboxId) {
+    for (const sel of ['brand-select', 'product-select', 'persona-select']) {
+      const wInp = widget.querySelector(`input[data-omega-element="${sel}"]`);
+      if (wInp instanceof Element && matchesListbox(wInp)) return wInp;
+    }
+  }
+  if (widget && !listboxId) {
+    const expanded = widget.querySelector(
+      'input[data-omega-element="brand-select"][aria-expanded="true"],' +
+        'input[data-omega-element="product-select"][aria-expanded="true"],' +
+        'input[data-omega-element="persona-select"][aria-expanded="true"]'
+    );
+    if (expanded instanceof Element) return expanded;
+  }
+
+  return null;
+}
+
+/** Language / locale comboboxes: never apply customer filter or layout hacks (same InputGroup popover as B/P/P). */
+function isLanguageOmegaListbox(listboxEl) {
+  if (!(listboxEl instanceof Element)) return false;
+  const id = listboxEl.getAttribute('id');
+  const docs = getAllGs4pmDocumentsForComboSearch();
+  for (const doc of docs) {
+    try {
+      const langInputs = doc.querySelectorAll(
+        'input[data-omega-element="language-select"], input[data-omega-element="locale-select"]'
+      );
+      for (const inp of langInputs) {
+        const ac = inp.getAttribute('aria-controls');
+        if (id && ac && (ac === id || ac.trim() === id)) return true;
+      }
+    } catch (e) {}
+  }
+  if (id) {
+    const esc = cssEscapeAttrValue(id);
+    for (const doc of docs) {
+      try {
+        const inp = doc.querySelector(`input[aria-controls="${esc}"]`);
+        if (!(inp instanceof Element)) continue;
+        const omega = (inp.getAttribute('data-omega-element') || '').toLowerCase();
+        if (omega === 'language-select' || omega === 'locale-select' || omega.includes('language')) return true;
+      } catch (e) {}
+    }
+  }
+  const al = (listboxEl.getAttribute('aria-label') || '').toLowerCase();
+  if (al.includes('language') && !al.includes('sponsored')) return true;
+  return false;
+}
+
+function getCreateFlowSelectTypeForListbox(listboxEl) {
+  if (!(listboxEl instanceof Element)) return null;
+  if (isLanguageOmegaListbox(listboxEl)) return null;
+  const input = findOmegaComboInputForListbox(listboxEl);
+  if (input instanceof Element) {
+    const omegaElement = input.getAttribute('data-omega-element') || '';
+    if (omegaElement === 'brand-select') return 'brand';
+    if (omegaElement === 'product-select') return 'product';
+    if (omegaElement === 'persona-select') return 'persona';
+  }
+  // Portal/iframe timing: listbox may briefly lack omega link; a11y name sometimes includes entity ("Suggestions Brand").
+  const a11yName = (listboxEl.getAttribute('aria-label') || '').toLowerCase();
+  if (a11yName.includes('persona')) return 'persona';
+  if (a11yName.includes('product')) return 'product';
+  if (a11yName.includes('brand')) return 'brand';
+
+  return null;
+}
+
+function isCreateFlowBrandProductPersonaListbox(listboxEl) {
+  const k = getCreateFlowSelectTypeForListbox(listboxEl);
+  return k === 'brand' || k === 'product' || k === 'persona';
+}
+
+function collectDropdownRows(listboxEl) {
+  if (!(listboxEl instanceof Element)) return [];
+  const rows = [];
+  const isCreateFlowListbox = isCreateFlowBrandProductPersonaListbox(listboxEl);
+  const wrapperRows = Array.from(listboxEl.querySelectorAll('[role="presentation"]')).filter((wrapper) => {
+    const optionCount = wrapper.querySelectorAll('[role="option"]').length;
+    if (optionCount !== 1) return false;
+    if (isCreateFlowListbox) return true;
+    return isVirtualizedPresentationRow(wrapper);
+  });
+  wrapperRows.forEach((wrapper) => rows.push({ row: wrapper, option: wrapper.querySelector('[role="option"]') }));
+
+  // Fallback: some listboxes render options without presentation wrappers.
+  if (!rows.length) {
+    Array.from(listboxEl.querySelectorAll('[role="option"]')).forEach((option) => {
+      rows.push({ row: option, option });
+    });
+  }
+  const filtered = rows.filter(
+    (entry) =>
+      entry.option instanceof Element &&
+      entry.row instanceof Element &&
+      isMeaningfulListboxOption(entry.option)
+  );
+  return filtered;
+}
+
+/*
+ * ═══════════════════════════════════════════════════════════════════════════
+ * CREATE-FLOW DROPDOWN FILTERING — ARCHITECTURE & ANTI-OSCILLATION RULES
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * DOM Hierarchy (React Spectrum virtualised combobox):
+ *
+ *   div[data-testid="popover"]          ← Popover overlay (display:flex; flex-direction:column)
+ *     └─ div[role="listbox"]            ← Listbox (flex child, flex-shrink:1 by default)
+ *          └─ div[role="presentation"]  ← Virtualizer scroll container (position:relative; height:Npx)
+ *               ├─ div[role="presentation"] style="position:absolute; top:0px"   ← Option row 1
+ *               ├─ div[role="presentation"] style="position:absolute; top:32px"  ← Option row 2
+ *               └─ ...
+ *
+ * React's virtualizer decides which option rows to mount by comparing the
+ * listbox's `clientHeight` (its viewport) to the total content height of the
+ * relative scroll container. Items outside the viewport are unmounted from
+ * the DOM entirely (not just hidden — the nodes are removed).
+ *
+ * THE OSCILLATION BUG — AND HOW TO AVOID IT:
+ *
+ * The feedback loop that caused infinite expand/shrink oscillation was:
+ *
+ *   1. Our filter pass compacts height on the popover → 139px
+ *   2. Popover is a FLEX COLUMN container. Its reduced height propagates to
+ *      the listbox (a flex child with flex-shrink:1) → listbox clientHeight
+ *      becomes 139px.
+ *   3. React's virtualizer sees a 139px viewport → unmounts items outside it.
+ *   4. Unmounting removes DOM nodes → our MutationObserver (childList) fires.
+ *   5. Observer re-runs filter pass → sees missing items → expands for
+ *      "hydration" → 320px.
+ *   6. Virtualizer sees 320px → remounts all items → observer fires → goto 1.
+ *
+ * RULES TO PREVENT RECURRENCE:
+ *
+ *   A) NEVER set height / max-height / min-height on the [role="listbox"]
+ *      element OR the internal relative [role="presentation"] scroll
+ *      container. These are React-controlled virtualizer dimensions. Setting
+ *      them changes clientHeight, which causes React to add/remove nodes.
+ *
+ *   B) ALWAYS set height on the POPOVER (the ancestor above the listbox) to
+ *      visually clip the dropdown. The popover is outside the virtualizer's
+ *      observation scope.
+ *
+ *   C) ALWAYS set flex-shrink:0 and min-height on the listbox to its full
+ *      content height (scrollHeight). This prevents the popover's reduced
+ *      height from propagating down through flex layout, keeping the
+ *      virtualizer's viewport stable at the full size.
+ *
+ *   D) The MutationObserver uses a re-entrancy guard (_gs4pmFilterRunning)
+ *      to skip mutations triggered by our own DOM changes. Do not remove it.
+ *
+ *   E) Do NOT call pumpCreateFlowVirtualizerRows() from the observer path.
+ *      It scrolls and resizes containers, which can trigger further React
+ *      reconciliation. Only pump during the initial filterDropdownWithRetry
+ *      hydration loop.
+ *
+ * IF YOU NEED TO CHANGE DROPDOWN SIZING:
+ *
+ *   - Change the popover height only (via getDropdownChrome().popover)
+ *   - If the listbox needs to be taller, increase its min-height — never
+ *     set a constraining height/max-height on it
+ *   - If you add a new container layer between popover and listbox, ensure
+ *     it does not constrain the listbox's clientHeight
+ *   - Test with Comicon filter + Persona dropdown — it has the smallest
+ *     visible/total ratio and is the most sensitive to oscillation
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+
+function getDropdownChrome(listboxEl) {
+  if (!(listboxEl instanceof Element)) {
+    return { parent: null, outerContainer: null, superOuter: null, popover: null };
+  }
+  const parent = Array.from(listboxEl.querySelectorAll('[role="presentation"]')).find(
+    (el) => window.getComputedStyle(el).position === 'relative'
+  ) || null;
+  const outerContainer = listboxEl.parentElement || null;
+  const superOuter =
+    outerContainer?.parentElement?.getAttribute('role') === 'presentation'
+      ? outerContainer.parentElement
+      : null;
+  const popover =
+    listboxEl.closest('[data-testid="popover"]') ||
+    listboxEl.closest('.spectrum-Popover') ||
+    listboxEl.closest('[role="presentation"][class*="Popover"]') ||
+    null;
+  return { parent, outerContainer, superOuter, popover };
+}
+
+/**
+ * Expand the popover to be tall enough for the virtualizer to mount all items.
+ * Called during filterDropdownWithRetry hydration to coax the virtualizer into
+ * rendering the full option set before we classify and hide.
+ *
+ * IMPORTANT (Rule A): Only touch popover-level containers (outerContainer,
+ * superOuter, popover). NEVER set height on listboxEl or its internal relative
+ * presentation row — doing so changes the virtualizer's clientHeight viewport
+ * and causes mount/unmount oscillation. See architecture comment above
+ * getDropdownChrome() for the full explanation.
+ */
+function ensureDropdownCanRenderAllItems(listboxEl, totalRows, rowSample) {
+  if (!(listboxEl instanceof Element) || !totalRows || totalRows < 1) return;
+  const { parent, outerContainer, superOuter, popover } = getDropdownChrome(listboxEl);
+  const itemHeight = parseInt(rowSample?.style?.height || '', 10) || 32;
+  const baseOffset = parseInt(rowSample?.dataset?.gs4pmOrigTop || rowSample?.style?.top || '', 10) || 4;
+  const computedTarget = Math.ceil(baseOffset + (totalRows * itemHeight) + 32);
+  const origHeights = [
+    parseInt(parent?.dataset?.gs4pmOrigHeight || parent?.style?.height || '', 10),
+    parseInt(listboxEl?.dataset?.gs4pmOrigHeight || listboxEl?.style?.height || '', 10),
+    parseInt(outerContainer?.dataset?.gs4pmOrigHeight || outerContainer?.style?.height || '', 10),
+    parseInt(popover?.dataset?.gs4pmOrigHeight || popover?.style?.height || '', 10),
+  ].filter((v) => Number.isFinite(v) && v > 0);
+  const targetHeight = Math.max(computedTarget, ...origHeights, 320);
+
+  [outerContainer, superOuter, popover].forEach((el) => {
+    if (!(el instanceof Element) || el === listboxEl || el === parent) return;
+    el.style.setProperty('height', targetHeight + 'px', 'important');
+    el.style.setProperty('max-height', targetHeight + 'px', 'important');
+    el.style.setProperty('min-height', targetHeight + 'px', 'important');
+  });
+}
+
+/**
+ * React Aria virtualized menus only mount rows that fit the viewport.
+ * Expand + scroll so more option rows mount before we filter (create-flow comboboxes).
+ */
+function pumpCreateFlowVirtualizerRows(listboxEl, inferredTotal, rowSample) {
+  if (!(listboxEl instanceof Element) || !inferredTotal) return;
+  ensureDropdownCanRenderAllItems(listboxEl, inferredTotal, rowSample);
+  const { parent } = getDropdownChrome(listboxEl);
+  const scrollTargets = [parent, listboxEl].filter((el) => el instanceof Element);
+  scrollTargets.forEach((el) => {
+    try {
+      el.style.setProperty('overflow-y', 'auto', 'important');
+      const max = el.scrollHeight - el.clientHeight;
+      if (max > 0) el.scrollTop = max;
+      else el.scrollTop = el.scrollHeight;
+      el.dispatchEvent(new WheelEvent('wheel', { deltaY: 400, bubbles: true, cancelable: true }));
+    } catch (e) {}
+  });
+}
+
+function isCreateFlowDropdownRow(rowEl) {
+  if (!(rowEl instanceof Element)) return false;
+  const listbox = rowEl.closest('[role="listbox"]');
+  return isCreateFlowBrandProductPersonaListbox(listbox);
+}
+
+function clearBppSoftHidePresentationRow(row) {
+  if (!(row instanceof Element)) return;
+  if (row.getAttribute(GS4PM_BPP_SOFT_HIDE_MARK) !== '1') return;
+  row.removeAttribute(GS4PM_BPP_SOFT_HIDE_MARK);
+  [
+    'visibility',
+    'height',
+    'min-height',
+    'max-height',
+    'overflow',
+    'pointer-events',
+    'padding-top',
+    'padding-bottom',
+    'margin',
+    'line-height',
+    'flex',
+    'border',
+  ].forEach((p) => row.style.removeProperty(p));
+  if (row.dataset.gs4pmBppSavedTop !== undefined) {
+    row.style.setProperty('top', row.dataset.gs4pmBppSavedTop);
+    delete row.dataset.gs4pmBppSavedTop;
+  }
+  if (row.dataset.gs4pmBppSavedLeft !== undefined) {
+    row.style.setProperty('left', row.dataset.gs4pmBppSavedLeft);
+    delete row.dataset.gs4pmBppSavedLeft;
+  }
+  delete row.dataset.gs4pmHidden;
+}
+
+/**
+ * Hide without display:none or node removal: keeps layout/React happier than ripping nodes.
+ * For absolute virtual rows, top is moved off-screen in addition to the bundle to avoid overlap with repacked visible rows.
+ */
+function applyBppSoftHidePresentationRow(row, hide, isVirtualized) {
+  if (!hide) {
+    clearBppSoftHidePresentationRow(row);
+    return;
+  }
+  if (!(row instanceof Element)) return;
+  if (!row.dataset.gs4pmOrigTop && row.style.top) {
+    row.dataset.gs4pmOrigTop = row.style.top;
+  }
+  if (isVirtualized) {
+    if (row.dataset.gs4pmBppSavedTop === undefined) {
+      row.dataset.gs4pmBppSavedTop = row.style.top || '';
+    }
+    if (row.dataset.gs4pmBppSavedLeft === undefined) {
+      row.dataset.gs4pmBppSavedLeft = row.style.left || '0px';
+    }
+    row.style.setProperty('top', '-9999px', 'important');
+    row.style.setProperty('left', '0px', 'important');
+  }
+  row.setAttribute(GS4PM_BPP_SOFT_HIDE_MARK, '1');
+  row.style.setProperty('visibility', 'hidden', 'important');
+  row.style.setProperty('height', '0', 'important');
+  row.style.setProperty('min-height', '0', 'important');
+  row.style.setProperty('max-height', '0', 'important');
+  row.style.setProperty('overflow', 'hidden', 'important');
+  row.style.setProperty('pointer-events', 'none', 'important');
+  row.style.setProperty('padding-top', '0', 'important');
+  row.style.setProperty('padding-bottom', '0', 'important');
+  row.style.setProperty('margin', '0', 'important');
+  row.style.setProperty('line-height', '0', 'important');
+  row.dataset.gs4pmHidden = 'true';
+}
+
+function presentationRowTopSortValue(row) {
+  if (!(row instanceof Element)) return 1e9;
+  const t = parseInt(row.style.top || row.dataset.gs4pmOrigTop || '', 10);
+  return Number.isFinite(t) ? t : 1e9;
+}
+
+/**
+ * Virtualizer can mount two [role=presentation] rows for the same data-key; dedupe affects our arrays
+ * but duplicate DOM slots stay visible. Keep one row per key (prefer repacked visible rows), soft-hide the rest.
+ */
+function hideDuplicatePresentationSlotsForBppKey(listboxEl, sortedVisibleRows) {
+  if (!(listboxEl instanceof Element)) return;
+  const visibleSet = new Set(sortedVisibleRows || []);
+  const wrappers = Array.from(listboxEl.querySelectorAll('[role="presentation"]')).filter(
+    (w) => w.querySelector('[role="option"]') && isVirtualizedPresentationRow(w)
+  );
+  const byKey = new Map();
+  for (const w of wrappers) {
+    const opt = w.querySelector('[role="option"]');
+    const k = getOptionDedupeKey(opt);
+    if (!k) continue;
+    if (!byKey.has(k)) byKey.set(k, []);
+    byKey.get(k).push(w);
+  }
+  for (const rows of byKey.values()) {
+    if (rows.length < 2) continue;
+    rows.sort((a, b) => presentationRowTopSortValue(a) - presentationRowTopSortValue(b));
+    const inVisible = rows.filter((r) => visibleSet.has(r));
+    const keeper = inVisible.length ? inVisible[0] : rows[0];
+    for (const r of rows) {
+      if (r !== keeper) applyBppSoftHidePresentationRow(r, true, true);
+    }
+  }
+}
+
+/**
+ * React Aria sometimes keeps a second non-absolute presentation row for the same option identity
+ * (usually the first visible option). Product seems not to expose it, but Brand/Persona do.
+ * Collapse any non-absolute duplicate whenever an absolute row for the same identity exists.
+ */
+function collapseMixedModeDuplicateRowsForBpp(listboxEl) {
+  if (!(listboxEl instanceof Element)) return;
+  const wrappers = Array.from(listboxEl.querySelectorAll('[role="presentation"]')).filter(
+    (w) => w.querySelectorAll('[role="option"]').length === 1
+  );
+  const byKey = new Map();
+  wrappers.forEach((w) => {
+    const opt = w.querySelector('[role="option"]');
+    const k = getOptionDedupeKey(opt);
+    if (!k) return;
+    if (!byKey.has(k)) byKey.set(k, []);
+    byKey.get(k).push(w);
+  });
+  byKey.forEach((rows) => {
+    if (rows.length < 2) return;
+    const absoluteRows = rows.filter((r) => isVirtualizedPresentationRow(r));
+    if (!absoluteRows.length) return;
+    rows.forEach((row) => {
+      if (absoluteRows.includes(row)) return;
+      applyBppSoftHidePresentationRow(row, true, false);
+    });
+  });
+}
+
+function teardownBppListboxPersistObserver(listboxEl) {
+  if (!(listboxEl instanceof Element)) return;
+  const entry = bppListboxPersistObservers.get(listboxEl);
+  if (entry) {
+    if (entry.observer) entry.observer.disconnect();
+    bppListboxPersistObservers.delete(listboxEl);
+  }
+  if (listboxEl._gs4pmBppDebounce) {
+    clearTimeout(listboxEl._gs4pmBppDebounce);
+    delete listboxEl._gs4pmBppDebounce;
+  }
+  delete listboxEl.dataset.gs4pmBppSessionCustomer;
+}
+
+/**
+ * Watches the listbox for childList mutations (React adding/removing option
+ * nodes) and re-runs the filter pass after a debounce.
+ *
+ * Anti-oscillation safeguards (Rule D):
+ *
+ *   - _gs4pmFilterRunning gate: if the filter pass is currently executing,
+ *     skip the mutation entirely. This prevents our own DOM changes from
+ *     re-triggering the observer. The flag is set in runBppCreateFlowFilterPass
+ *     and cleared asynchronously via requestAnimationFrame so it persists
+ *     through React's synchronous reconciliation.
+ *
+ *   - Debounce (BPP_LISTBOX_OBSERVER_DEBOUNCE_MS): batches rapid mutations
+ *     into a single filter pass.
+ *
+ *   - fromObserver: true: the filter pass called from here does NOT call
+ *     pumpCreateFlowVirtualizerRows (Rule E) to avoid scroll/resize side
+ *     effects that could re-trigger the virtualizer.
+ *
+ * MAINTENANCE: if you change what this observer watches (e.g. adding
+ * attributes), be aware that style changes on individual rows could create
+ * high-frequency firing. Only childList + subtree is needed.
+ */
+function installBppListboxPersistObserver(listboxEl) {
+  if (!(listboxEl instanceof Element)) return;
+  if (!isCreateFlowBrandProductPersonaListbox(listboxEl)) return;
+  teardownBppListboxPersistObserver(listboxEl);
+  const observer = new MutationObserver(() => {
+    if (listboxEl._gs4pmFilterRunning) return;
+    if (listboxEl._gs4pmBppDebounce) clearTimeout(listboxEl._gs4pmBppDebounce);
+    listboxEl._gs4pmBppDebounce = setTimeout(() => {
+      delete listboxEl._gs4pmBppDebounce;
+      if (!listboxEl.isConnected) {
+        teardownBppListboxPersistObserver(listboxEl);
+        return;
+      }
+      if (currentFilterCustomer === 'ALL' || !cachedTags.length) return;
+      if (listboxEl._gs4pmFilterRunning) return;
+      runBppCreateFlowFilterPass(listboxEl, { fromObserver: true });
+    }, BPP_LISTBOX_OBSERVER_DEBOUNCE_MS);
+  });
+  observer.observe(listboxEl, { childList: true, subtree: true });
+  bppListboxPersistObservers.set(listboxEl, { observer });
+}
+
+/**
+ * Single pass: classify rows by stable option identity, repack visible virtual
+ * rows at the top of the container, soft-hide the rest.
+ *
+ * Called from:
+ *   - filterDropdownWithRetry (initial open, fromObserver=false)
+ *   - installBppListboxPersistObserver callback (fromObserver=true)
+ *
+ * Guard flag (_gs4pmFilterRunning):
+ *   Set to true before the inner pass and cleared on the NEXT animation frame.
+ *   requestAnimationFrame is used (not microtask) because React's synchronous
+ *   reconciliation can happen within the same microtask queue — clearing too
+ *   early would let the observer re-enter before React finishes. rAF ensures
+ *   the flag survives through layout/paint.
+ *
+ * Legacy observer teardown:
+ *   Disconnects the old dropdownHeightObserver and dropdownWatchdogInterval
+ *   which belong to the non-create-flow reorderVirtualizedDropdown system.
+ *   These would fight with our height management if left running.
+ */
+function runBppCreateFlowFilterPass(listboxContainer, opts) {
+  const fromObserver = opts && opts.fromObserver;
+  const attempt = opts && typeof opts.attempt === 'number' ? opts.attempt : 1;
+  if (!listboxContainer || !listboxContainer.isConnected) return;
+  if (currentFilterCustomer === 'ALL' || !cachedTags.length) return;
+  if (!isCreateFlowBrandProductPersonaListbox(listboxContainer)) return;
+
+  // Tear down legacy height-management systems that would conflict
+  if (dropdownHeightObserver) {
+    dropdownHeightObserver.disconnect();
+    dropdownHeightObserver = null;
+    targetDropdownHeight = null;
+  }
+  if (dropdownWatchdogInterval) {
+    clearInterval(dropdownWatchdogInterval);
+    dropdownWatchdogInterval = null;
+  }
+
+  // Set re-entrancy guard — cleared after next paint (see Rule D)
+  listboxContainer._gs4pmFilterRunning = true;
+  try {
+    _runBppCreateFlowFilterPassInner(listboxContainer, opts);
+  } finally {
+    requestAnimationFrame(() => {
+      listboxContainer._gs4pmFilterRunning = false;
+    });
+  }
+}
+
+function _runBppCreateFlowFilterPassInner(listboxContainer, opts) {
+  const fromObserver = opts && opts.fromObserver;
+  const attempt = opts && typeof opts.attempt === 'number' ? opts.attempt : 1;
+  const tags = cachedTags;
+  const activeCustomer = currentFilterCustomer;
+  const dropdownRows = collectDropdownRows(listboxContainer);
+  const inferredTotal =
+    listboxContainer._gs4pmExpectedTotal ||
+    inferListboxTotalOptionCount(listboxContainer) ||
+    dropdownRows.length ||
+    null;
+  const dropdownKind = getCreateFlowSelectTypeForListbox(listboxContainer) || 'unknown';
+  const {
+    decisions: decisionMap,
+    noTagMatchCount: createFlowNoTagMatch,
+    hiddenIdentityCount: createFlowShouldHide,
+  } = buildBppDropdownDecisionMap(dropdownRows, tags, activeCustomer, dropdownKind);
+  const expectedVisibleIdentityCount = Array.from(decisionMap.values()).filter((decision) => !decision.shouldHide).length;
+  if (expectedVisibleIdentityCount > 0) {
+    listboxContainer._gs4pmExpectedVisibleCount = Math.max(
+      listboxContainer._gs4pmExpectedVisibleCount || 0,
+      expectedVisibleIdentityCount
+    );
+  }
+
+  listboxContainer.querySelectorAll(`[${GS4PM_BPP_SOFT_HIDE_MARK}="1"]`).forEach((el) => {
+    clearBppSoftHidePresentationRow(el);
+  });
+
+  const visibleDropdownWrappers = [];
+  const hiddenDropdownWrappers = [];
+  const visibleRowMeta = [];
+
+  const byIdentity = new Map();
+  dropdownRows.forEach((entry) => {
+    const key = getDropdownRowIdentityKey(entry);
+    if (!key) return;
+    if (!byIdentity.has(key)) byIdentity.set(key, []);
+    byIdentity.get(key).push(entry);
+  });
+
+  const getNumericTop = (row) => {
+    const v = parseInt(row?.dataset?.gs4pmOrigTop || row?.style?.top || '', 10);
+    return Number.isFinite(v) ? v : null;
+  };
+  const getMeasuredRowHeight = (row) => {
+    if (!(row instanceof Element)) return 32;
+    const styleHeight = parseInt(row.style.height || '', 10);
+    if (Number.isFinite(styleHeight) && styleHeight > 0 && styleHeight < 140) return styleHeight;
+    try {
+      const rectHeight = Math.round(row.getBoundingClientRect().height || 0);
+      if (rectHeight > 0 && rectHeight < 140) return rectHeight;
+      const computedHeight = parseInt(window.getComputedStyle(row).height || '', 10);
+      if (Number.isFinite(computedHeight) && computedHeight > 0 && computedHeight < 140) return computedHeight;
+    } catch (e) {}
+    return 32;
+  };
+  const pickVisibleKeeper = (entries) => {
+    return (entries || []).slice().sort((a, b) => {
+      const aTop = getNumericTop(a.row);
+      const bTop = getNumericTop(b.row);
+      const aHasTop = aTop !== null ? 1 : 0;
+      const bHasTop = bTop !== null ? 1 : 0;
+      if (aHasTop !== bHasTop) return bHasTop - aHasTop;
+      const aHeight = getMeasuredRowHeight(a.row);
+      const bHeight = getMeasuredRowHeight(b.row);
+      if (aHeight !== bHeight) return aHeight - bHeight;
+      return (aTop ?? 1e9) - (bTop ?? 1e9);
+    })[0] || null;
+  };
+
+  byIdentity.forEach((entries, identityKey) => {
+    const decision = decisionMap.get(identityKey) || {
+      shouldHide: false,
+      matchesAnyStoredTag: false,
+    };
+    const { shouldHide } = decision;
+    if (shouldHide) {
+      entries.forEach(({ row }) => hiddenDropdownWrappers.push(row));
+      return;
+    }
+    const keeper = pickVisibleKeeper(entries);
+    entries.forEach(({ row }) => {
+      if (row === keeper?.row) visibleDropdownWrappers.push(row);
+      else hiddenDropdownWrappers.push(row);
+    });
+    if (keeper?.row) {
+      visibleRowMeta.push({
+        row: keeper.row,
+        height: getMeasuredRowHeight(keeper.row),
+        origTop: getNumericTop(keeper.row) ?? 1e9,
+      });
+    }
+  });
+
+  if (!fromObserver) {
+    const sampleKey = resolveDropdownOptionIdentity(dropdownRows[0]?.option || null).primary || '';
+    console.log(
+      '[GS4PM Filter] Create-flow tag stats',
+      JSON.stringify({
+        attempt,
+        kind: dropdownKind,
+        filter: currentFilterCustomer,
+        tagsLoaded: cachedTags.length,
+        optionRows: dropdownRows.length,
+        optionsWithNoMatchingTag: createFlowNoTagMatch,
+        rowsMarkedToHide: createFlowShouldHide,
+        sampleIdentity: sampleKey.slice(0, 48),
+      })
+    );
+    if (createFlowNoTagMatch === decisionMap.size && cachedTags.length > 0) {
+      console.warn(
+        '[GS4PM Filter] No dropdown option matched any stored tag — check selectors vs data-key / data-item-id on options.'
+      );
+    }
+  }
+  const baseTopCandidates = dropdownRows
+    .map(({ row }) => parseInt(row.dataset.gs4pmOrigTop || row.style.top || '', 10))
+    .filter((n) => Number.isFinite(n));
+  const sortedVisible = visibleRowMeta.slice().sort((a, b) => a.origTop - b.origTop);
+  const baseOffset = baseTopCandidates.length ? Math.min(...baseTopCandidates) : 4;
+  const rowSample = sortedVisible[0]?.row || dropdownRows[0]?.row || null;
+  const estimatedRowHeight =
+    rowSample instanceof Element
+      ? Math.max(24, getMeasuredRowHeight(rowSample))
+      : 32;
+  const knownExpectedVisibleCount = Math.max(
+    expectedVisibleIdentityCount,
+    listboxContainer._gs4pmExpectedVisibleCount || 0
+  );
+  const needsHydrationSpace =
+    (
+      Number.isFinite(inferredTotal) &&
+      inferredTotal > 0 &&
+      dropdownRows.length < inferredTotal
+    ) ||
+    (
+      knownExpectedVisibleCount > 0 &&
+      visibleRowMeta.length < knownExpectedVisibleCount &&
+      Number.isFinite(inferredTotal) &&
+      inferredTotal > 0
+    );
+  let runningTop = baseOffset;
+  sortedVisible.forEach(({ row, height }) => {
+    clearBppSoftHidePresentationRow(row);
+    row.style.setProperty('top', runningTop + 'px', 'important');
+    row.style.setProperty('left', '0px', 'important');
+    row.style.display = '';
+    row.style.setProperty('visibility', 'visible', 'important');
+    row.style.setProperty('opacity', '1', 'important');
+    row.style.setProperty('pointer-events', 'auto', 'important');
+    row.style.setProperty('overflow', 'visible', 'important');
+    row.style.setProperty('height', height + 'px', 'important');
+    row.style.setProperty('min-height', height + 'px', 'important');
+    row.style.setProperty('max-height', height + 'px', 'important');
+    const option = row.querySelector('[role="option"]');
+    if (option instanceof Element) {
+      option.style.setProperty('pointer-events', 'auto', 'important');
+      option.style.setProperty('visibility', 'visible', 'important');
+    }
+    delete row.dataset.gs4pmHidden;
+    runningTop += height;
+  });
+  hiddenDropdownWrappers.forEach((row) => {
+    applyBppSoftHidePresentationRow(row, true, isVirtualizedPresentationRow(row));
+  });
+  collapseMixedModeDuplicateRowsForBpp(listboxContainer);
+
+  const visibleUniqueCount = sortedVisible.length;
+  let finalHeight = visibleUniqueCount > 0
+    ? Math.max(36, runningTop)
+    : 36;
+  try {
+    const lastRow = sortedVisible[sortedVisible.length - 1]?.row;
+    if (lastRow && listboxContainer.isConnected) {
+      const optEl = lastRow.querySelector('[role="option"]') || lastRow;
+      const measured = optEl.getBoundingClientRect().bottom - listboxContainer.getBoundingClientRect().top + 6;
+      if (Number.isFinite(measured) && measured > 24) {
+        finalHeight = Math.max(finalHeight, Math.ceil(measured));
+      }
+    }
+  } catch (e) {}
+  if (needsHydrationSpace) {
+    const hydrationHeight = Math.ceil(baseOffset + (inferredTotal * estimatedRowHeight) + 32);
+    finalHeight = Math.max(finalHeight, hydrationHeight, 320);
+  }
+  const { parent, outerContainer, superOuter, popover } = getDropdownChrome(listboxContainer);
+
+  // ── HEIGHT MANAGEMENT (see anti-oscillation rules A–C above) ──────────
+  //
+  // SAFE to resize:  popover, outerContainer, superOuter  (Rule B)
+  // NEVER resize:    listboxContainer, parent (relRow)    (Rule A)
+  //
+  // The popover visually clips the dropdown to finalHeight. The listbox
+  // itself must stay at its full content height so the virtualizer's
+  // clientHeight viewport doesn't shrink and trigger item unmounting.
+
+  [outerContainer, superOuter, popover].forEach((el) => {
+    if (!(el instanceof Element)) return;
+    if (el === listboxContainer || el === parent) return;
+    el.style.setProperty('height', finalHeight + 'px', 'important');
+    el.style.setProperty('max-height', finalHeight + 'px', 'important');
+    el.style.setProperty('min-height', finalHeight + 'px', 'important');
+    el.style.setProperty('overflow', 'hidden', 'important');
+  });
+
+  // ── LISTBOX FLEX-SHRINK PROTECTION (Rule C) ───────────────────────────
+  //
+  // The popover is display:flex; flex-direction:column. The listbox is a
+  // flex child with flex-shrink:1 by default. When we reduce the popover's
+  // height, the flex algorithm shrinks the listbox to match — changing its
+  // clientHeight and causing the virtualizer to unmount items (oscillation).
+  //
+  // Fix: pin min-height to scrollHeight and disable flex-shrink. The
+  // listbox stays at full content height; the popover's overflow:hidden
+  // clips the visual excess.
+  //
+  // MAINTENANCE: if the Spectrum popover structure changes (e.g. a new
+  // wrapper between popover and listbox, or the popover stops using flex),
+  // verify that the listbox clientHeight still equals its full content
+  // height after the filter pass. If not, the oscillation will return.
+
+  if (listboxContainer instanceof Element) {
+    listboxContainer.style.setProperty('overflow', 'hidden', 'important');
+    const fullContentHeight = Math.max(listboxContainer.scrollHeight || 0, 318);
+    listboxContainer.style.setProperty('min-height', fullContentHeight + 'px', 'important');
+    listboxContainer.style.setProperty('flex-shrink', '0', 'important');
+  }
+
+  if (!fromObserver && (visibleDropdownWrappers.length > 0 || hiddenDropdownWrappers.length > 0)) {
+    console.log(
+      '[GS4PM Filter] Create-flow dropdown:',
+      'visible =',
+      visibleUniqueCount,
+      'hidden =',
+      createFlowShouldHide
+    );
+  }
+}
+
+function resetDropdownRows(rows) {
+  (rows || []).forEach((row) => {
+    if (!(row instanceof Element)) return;
+    if (row.getAttribute(GS4PM_BPP_SOFT_HIDE_MARK) === '1') {
+      clearBppSoftHidePresentationRow(row);
+    }
+    if (row.dataset.gs4pmOrigTop !== undefined) {
+      row.style.top = row.dataset.gs4pmOrigTop;
+    }
+    if (row.style.left === '-9999px') {
+      row.style.left = '0px';
+    }
+    row.style.display = '';
+    row.style.visibility = 'visible';
+    row.style.opacity = '1';
+    delete row.dataset.gs4pmHidden;
+  });
+}
+
+function cleanupCreateFlowDropdownState(listboxEl) {
+  if (!(listboxEl instanceof Element)) return;
+  if (!isCreateFlowBrandProductPersonaListbox(listboxEl)) return;
+  teardownBppListboxPersistObserver(listboxEl);
+  listboxEl.querySelectorAll(`[${GS4PM_BPP_SOFT_HIDE_MARK}="1"]`).forEach((el) => clearBppSoftHidePresentationRow(el));
+  const staleRows = Array.from(
+    listboxEl.querySelectorAll('[role="presentation"][data-gs4pm-orig-top],[role="presentation"][data-gs4pm-hidden="true"]')
+  );
+  if (staleRows.length) {
+    try { restoreVirtualizedDropdown(staleRows); } catch (e) {}
+  }
+  const { parent, outerContainer, superOuter, popover } = getDropdownChrome(listboxEl);
+  [parent, listboxEl, outerContainer, superOuter, popover].forEach((el) => {
+    if (!(el instanceof Element)) return;
+    delete el.dataset.gs4pmObserverActive;
+  });
+}
+
+function resetCreateFlowDropdownLayout(listboxEl) {
+  if (!(listboxEl instanceof Element)) return;
+  if (!isCreateFlowBrandProductPersonaListbox(listboxEl)) return;
+  const { parent, outerContainer, superOuter, popover } = getDropdownChrome(listboxEl);
+  [parent, listboxEl, outerContainer, superOuter, popover].forEach((el) => {
+    if (!(el instanceof Element)) return;
+    el.style.removeProperty('height');
+    el.style.removeProperty('max-height');
+    el.style.removeProperty('min-height');
+    el.style.removeProperty('overflow');
+  });
+  if (dropdownHeightObserver) {
+    dropdownHeightObserver.disconnect();
+    dropdownHeightObserver = null;
+    targetDropdownHeight = null;
+  }
+  if (dropdownWatchdogInterval) {
+    clearInterval(dropdownWatchdogInterval);
+    dropdownWatchdogInterval = null;
+  }
+}
 
 function applyFilterToNode(node) {
   if (!node || !(node instanceof Element)) return;
   if (currentFilterCustomer === 'ALL') return;
   if (!cachedTags.length) return;
-  if (isContentAssetsPage()) return;
-  if (isTemplatesPage()) return;
+
+  // Dropdowns: must run even on content/templates routes (those pages skip non-dropdown DOM filtering below).
+  let listboxContainer = null;
+  if (node.matches('[role="listbox"]')) {
+    listboxContainer = node;
+  } else if (node.closest('[role="listbox"]')) {
+    listboxContainer = node.closest('[role="listbox"]');
+  } else if (node.querySelector('[role="listbox"]')) {
+    listboxContainer = node.querySelector('[role="listbox"]');
+  }
+
+  if (listboxContainer) {
+    // Language combobox: same Spectrum popover as B/P/P — never run our filter or height/repack logic.
+    if (isLanguageOmegaListbox(listboxContainer)) {
+      return;
+    }
+    const isCreateFlowEntityListbox = isCreateFlowBrandProductPersonaListbox(listboxContainer);
+    if (
+      isCreateFlowEntityListbox &&
+      listboxContainer.dataset.gs4pmBppSessionCustomer === currentFilterCustomer &&
+      bppListboxPersistObservers.has(listboxContainer)
+    ) {
+      return;
+    }
+    cleanupCreateFlowDropdownState(listboxContainer);
+    resetCreateFlowDropdownLayout(listboxContainer);
+    // Prevent duplicate filtering of the same listbox
+    if (filteringListboxes.has(listboxContainer)) {
+      return; // Already filtering this listbox, skip
+    }
+    
+    // Mark as filtering
+    clearReleaseFilteringTimer(listboxContainer);
+    filteringListboxes.add(listboxContainer);
+    if (isCreateFlowEntityListbox) {
+      listboxContainer.dataset.gs4pmBppSessionCustomer = currentFilterCustomer;
+      installBppListboxPersistObserver(listboxContainer);
+    }
+    
+    // Cancel any existing retry timeouts from previous dropdown opens
+    dropdownRetryTimeouts.forEach(timeoutId => clearTimeout(timeoutId));
+    dropdownRetryTimeouts = [];
+    
+    // Disconnect any existing item observer
+    if (dropdownItemObserver) {
+      dropdownItemObserver.disconnect();
+      dropdownItemObserver = null;
+    }
+    
+    clearTimeout(pendingDropdownFilter);
+
+    const listboxMaxAttempts = isCreateFlowBrandProductPersonaListbox(listboxContainer) ? 35 : 20;
+    const filterDropdownWithRetry = (attempt = 1, maxAttempts = listboxMaxAttempts) => {
+      if (attempt > 1) {
+        console.log('[GS4PM Filter] 🔁 filterDropdownWithRetry retry attempt', attempt);
+      }
+      
+      // Check if listbox still exists (dropdown might have closed)
+      if (!listboxContainer.isConnected) {
+        console.log('[GS4PM Filter] ⚠️ Dropdown closed during retry, aborting');
+        clearReleaseFilteringTimer(listboxContainer);
+        filteringListboxes.delete(listboxContainer);
+        return;
+      }
+      
+      // Mark as filtering (only on first attempt to avoid race conditions)
+      if (attempt === 1) {
+        filteringListboxes.add(listboxContainer);
+      }
+      // Query fresh dropdown rows from DOM.
+      const dropdownRows = collectDropdownRows(listboxContainer);
+      const freshWrappers = dropdownRows.map(entry => entry.row);
+      const isCreateFlowEntityListbox = isCreateFlowBrandProductPersonaListbox(listboxContainer);
+
+      // If virtualization is still hydrating items, retry briefly (when the DOM exposes a total).
+      // Create-flow: aria-setsize can reflect full dataset size while the virtualizer only mounts a subset.
+      // But if we stop too early, Persona/Brand can settle on a partial list and permanently hide valid rows.
+      // Only skip hydration wait once the mounted row count is "close enough" to the inferred total.
+      const inferredTotalNow = inferListboxTotalOptionCount(listboxContainer);
+      if (
+        isCreateFlowEntityListbox &&
+        Number.isFinite(inferredTotalNow) &&
+        inferredTotalNow > 0
+      ) {
+        listboxContainer._gs4pmExpectedTotal = Math.max(
+          listboxContainer._gs4pmExpectedTotal || 0,
+          inferredTotalNow
+        );
+      }
+      const inferredTotal =
+        listboxContainer._gs4pmExpectedTotal ||
+        inferredTotalNow ||
+        freshWrappers.length ||
+        null;
+      const canSkipHydrationWait =
+        isCreateFlowEntityListbox &&
+        attempt >= 4 &&
+        inferredTotal &&
+        freshWrappers.length >= Math.max(1, Math.ceil(inferredTotal * 0.9));
+      if (
+        inferredTotal &&
+        freshWrappers.length < inferredTotal &&
+        attempt < maxAttempts &&
+        !canSkipHydrationWait
+      ) {
+        if (isCreateFlowEntityListbox) {
+          pumpCreateFlowVirtualizerRows(
+            listboxContainer,
+            inferredTotal,
+            dropdownRows[0]?.row || null
+          );
+        }
+        const delay = isCreateFlowEntityListbox
+          ? Math.min(80 + attempt * 60, 400)
+          : Math.min(attempt * 250, 1000);
+        const scheduleRetry = () => {
+          const timeoutId = setTimeout(() => filterDropdownWithRetry(attempt + 1, maxAttempts), delay);
+          dropdownRetryTimeouts.push(timeoutId);
+        };
+        if (isCreateFlowEntityListbox) {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(scheduleRetry);
+          });
+        } else {
+          scheduleRetry();
+        }
+        return;
+      }
+      
+      // First, make ALL wrappers visible (clean slate)
+      freshWrappers.forEach(wrapper => {
+        wrapper.style.display = '';
+      });
+
+      if (isCreateFlowEntityListbox) {
+        runBppCreateFlowFilterPass(listboxContainer, { attempt, fromObserver: false });
+        if (attempt > 1) {
+          console.log(
+            '[GS4PM Filter] 🔁 Retry attempt',
+            attempt + ':',
+            '(create-flow B/P/P pass complete)'
+          );
+        }
+        scheduleReleaseFilteringListbox(listboxContainer);
+        return;
+      }
+
+      const visibleDropdownWrappers = [];
+      const hiddenDropdownWrappers = [];
+
+      dropdownRows.forEach(({ row, option }) => {
+        let isTaggedToCurrent = false;
+        let isTaggedToOther = false;
+
+        cachedTags.forEach((tag) => {
+          try {
+            if (dropdownOptionMatchesTag(option, tag)) {
+              if (tag.customer === currentFilterCustomer) {
+                isTaggedToCurrent = true;
+              } else {
+                isTaggedToOther = true;
+              }
+            }
+          } catch (e) {
+            /* Invalid selector */
+          }
+        });
+
+        const shouldHide = isTaggedToOther && !isTaggedToCurrent;
+        const isVirtualizedRow = isVirtualizedPresentationRow(row);
+
+        if (shouldHide) {
+          if (isVirtualizedRow) hiddenDropdownWrappers.push(row);
+        } else {
+          if (isVirtualizedRow) visibleDropdownWrappers.push(row);
+        }
+      });
+
+      if (attempt > 1) {
+        console.log(
+          '[GS4PM Filter] 🔁 Retry attempt',
+          attempt + ':',
+          'visible =',
+          visibleDropdownWrappers.length,
+          'hidden =',
+          hiddenDropdownWrappers.length
+        );
+      }
+
+      if (visibleDropdownWrappers.length > 0 || hiddenDropdownWrappers.length > 0) {
+        console.log(
+          '[GS4PM Filter] 📞 Calling reorderVirtualizedDropdown from filterDropdownWithRetry (visible:',
+          visibleDropdownWrappers.length,
+          'hidden:',
+          hiddenDropdownWrappers.length + ')'
+        );
+        reorderVirtualizedDropdown(visibleDropdownWrappers, hiddenDropdownWrappers);
+      }
+      scheduleReleaseFilteringListbox(listboxContainer);
+    };
+    
+    // B/P/P: debounced listbox MutationObserver (installBppListboxPersistObserver) re-applies after virtualizer recycles rows.
+    if (!isCreateFlowBrandProductPersonaListbox(listboxContainer)) {
+      if (dropdownItemObserver) {
+        dropdownItemObserver.disconnect();
+      }
+
+      let lastWrapperCount = 0;
+      let stableCount = 0;
+
+      dropdownItemObserver = new MutationObserver(() => {
+        const currentWrappers = collectDropdownRows(listboxContainer).map((entry) => entry.row);
+
+        if (currentWrappers.length !== lastWrapperCount) {
+          lastWrapperCount = currentWrappers.length;
+          stableCount = 0;
+          console.log('[GS4PM Filter] 🔍 Item observer: found', currentWrappers.length, 'wrappers');
+          return;
+        }
+
+        stableCount++;
+
+        const inferredTotal = inferListboxTotalOptionCount(listboxContainer);
+        if (stableCount >= 2 || (inferredTotal && currentWrappers.length >= inferredTotal)) {
+          console.log('[GS4PM Filter] ✅ Item count stable at', currentWrappers.length, 'items, filtering now');
+          dropdownItemObserver.disconnect();
+          dropdownItemObserver = null;
+          filterDropdownWithRetry();
+        }
+      });
+
+      dropdownItemObserver.observe(listboxContainer, { childList: true, subtree: true });
+    }
+
+    // Run ASAP so the menu does not sit at full list height while tags apply (reduces flash).
+    requestAnimationFrame(() => {
+      if (collectDropdownRows(listboxContainer).length > 0) {
+        filterDropdownWithRetry();
+      }
+    });
+
+    pendingDropdownFilter = setTimeout(() => {
+      if (dropdownItemObserver) {
+        dropdownItemObserver.disconnect();
+        dropdownItemObserver = null;
+      }
+      filterDropdownWithRetry();
+    }, 400);
+    
+    // Early return - don't filter yet
+    return;
+  }
+
+  if (isContentAssetsPage() || isTemplatesPage()) return;
 
   // NEW LOGIC: Hide only items tagged to OTHER customers
   // Show items tagged to current customer + all untagged items
@@ -3005,193 +4778,6 @@ function applyFilterToNode(node) {
       }
     });
   });
-
-  // Check if this node is part of a dropdown or contains dropdown options
-  // If so, find the parent listbox and query ALL wrappers from there
-  let listboxContainer = null;
-  
-  if (node.matches('[role="listbox"]')) {
-    listboxContainer = node;
-  } else if (node.closest('[role="listbox"]')) {
-    listboxContainer = node.closest('[role="listbox"]');
-  } else if (node.querySelector('[role="listbox"]')) {
-    listboxContainer = node.querySelector('[role="listbox"]');
-  }
-  
-  if (listboxContainer) {
-    // Prevent duplicate filtering of the same listbox
-    if (filteringListboxes.has(listboxContainer)) {
-      return; // Already filtering this listbox, skip
-    }
-    
-    // Mark as filtering
-    filteringListboxes.add(listboxContainer);
-    
-    // Cancel any existing retry timeouts from previous dropdown opens
-    dropdownRetryTimeouts.forEach(timeoutId => clearTimeout(timeoutId));
-    dropdownRetryTimeouts = [];
-    
-    // Disconnect any existing item observer
-    if (dropdownItemObserver) {
-      dropdownItemObserver.disconnect();
-      dropdownItemObserver = null;
-    }
-    
-    clearTimeout(pendingDropdownFilter);
-    
-    const filterDropdownWithRetry = (attempt = 1, maxAttempts = 5) => {
-      // Prevent duplicate filtering - if already filtering this listbox and this is a new attempt (not a retry), skip
-      // Retries (attempt > 1) are allowed to proceed as they're part of the same filtering operation
-      if (filteringListboxes.has(listboxContainer) && attempt === 1) {
-        console.log('[GS4PM Filter] ⏸️ filterDropdownWithRetry skipped - already filtering this listbox');
-        return;
-      }
-      
-      // Log call stack to see what triggered this
-      const stack = new Error().stack;
-      const caller = stack.split('\n')[2] || 'unknown';
-      console.log('[GS4PM Filter] 🔁 filterDropdownWithRetry attempt', attempt, 'called from:', caller.trim());
-      
-      // Check if listbox still exists (dropdown might have closed)
-      if (!document.body.contains(listboxContainer)) {
-        console.log('[GS4PM Filter] ⚠️ Dropdown closed during retry, aborting');
-        filteringListboxes.delete(listboxContainer);
-        return;
-      }
-      
-      // Mark as filtering (only on first attempt to avoid race conditions)
-      if (attempt === 1) {
-        filteringListboxes.add(listboxContainer);
-      }
-      // Query FRESH wrappers from DOM (not stale references)
-      const freshWrappers = Array.from(listboxContainer.querySelectorAll('[role="presentation"]')).filter(wrapper => 
-        wrapper.querySelector('[role="option"]') && wrapper.style.position === 'absolute'
-      );
-
-      // If virtualization is still hydrating items, retry briefly (when the DOM exposes a total).
-      const inferredTotal = inferListboxTotalOptionCount(listboxContainer);
-      if (inferredTotal && freshWrappers.length < inferredTotal && attempt < maxAttempts) {
-        const delay = Math.min(attempt * 250, 1000);
-        const timeoutId = setTimeout(() => filterDropdownWithRetry(attempt + 1, maxAttempts), delay);
-        dropdownRetryTimeouts.push(timeoutId);
-        return;
-      }
-      
-      // First, make ALL wrappers visible (clean slate)
-      freshWrappers.forEach(wrapper => {
-        wrapper.style.display = '';
-      });
-      
-      // Categorize based on tags
-      const visibleDropdownWrappers = [];
-      const hiddenDropdownWrappers = [];
-      
-      freshWrappers.forEach(wrapper => {
-        const option = wrapper.querySelector('[role="option"]');
-        if (!option) return;
-        
-        // Check if this option matches any tag
-        let isTaggedToCurrent = false;
-        let isTaggedToOther = false;
-        
-        cachedTags.forEach(tag => {
-          try {
-            if (option.matches(tag.selector)) {
-              if (tag.customer === currentFilterCustomer) {
-                isTaggedToCurrent = true;
-              } else {
-                isTaggedToOther = true;
-              }
-            }
-          } catch (e) {
-            // Invalid selector, skip
-          }
-        });
-        
-        // Show if: untagged OR tagged to current customer
-        // Hide if: tagged ONLY to other customers
-        if (isTaggedToOther && !isTaggedToCurrent) {
-          hiddenDropdownWrappers.push(wrapper);
-        } else {
-          // Show untagged items and items tagged to current customer
-          visibleDropdownWrappers.push(wrapper);
-        }
-      });
-      
-      // Only log if attempt > 1 (retries)
-      if (attempt > 1) {
-        console.log('[GS4PM Filter] 🔁 Retry attempt', attempt + ':', 'visible =', visibleDropdownWrappers.length, 'hidden =', hiddenDropdownWrappers.length);
-      }
-      
-      // REMOVED: Pre-setting height before filtering was causing React to remove items
-      // Instead, we'll filter first, then set height after items are positioned
-      // This ensures React has all items rendered before we adjust heights
-      
-      // Fallback: filter without pre-setting height
-      if (visibleDropdownWrappers.length > 0 || hiddenDropdownWrappers.length > 0) {
-        console.log('[GS4PM Filter] 📞 Calling reorderVirtualizedDropdown from filterDropdownWithRetry (visible:', visibleDropdownWrappers.length, 'hidden:', hiddenDropdownWrappers.length + ')');
-        reorderVirtualizedDropdown(visibleDropdownWrappers, hiddenDropdownWrappers);
-        
-        // Mark filtering as complete after a delay to allow React to settle
-        setTimeout(() => {
-          filteringListboxes.delete(listboxContainer);
-        }, 1000); // Delay to ensure React settles
-      } else {
-        // No items to filter, mark as complete immediately
-        filteringListboxes.delete(listboxContainer);
-      }
-    };
-    
-    // Disconnect any existing item observer
-    if (dropdownItemObserver) {
-      dropdownItemObserver.disconnect();
-    }
-    
-    // Use MutationObserver to detect when items are added, then filter
-    let lastWrapperCount = 0;
-    let stableCount = 0;
-    
-    dropdownItemObserver = new MutationObserver((mutations) => {
-      const currentWrappers = Array.from(listboxContainer.querySelectorAll('[role="presentation"]')).filter(wrapper => 
-        wrapper.querySelector('[role="option"]') && wrapper.style.position === 'absolute'
-      );
-      
-      // If count changed, reset stability counter
-      if (currentWrappers.length !== lastWrapperCount) {
-        lastWrapperCount = currentWrappers.length;
-        stableCount = 0;
-        console.log('[GS4PM Filter] 🔍 Item observer: found', currentWrappers.length, 'wrappers');
-        return;
-      }
-      
-      // Count is stable, increment counter
-      stableCount++;
-      
-      // If count has been stable for 2 observations (or we reached a known total), filter.
-      const inferredTotal = inferListboxTotalOptionCount(listboxContainer);
-      if (stableCount >= 2 || (inferredTotal && currentWrappers.length >= inferredTotal)) {
-        console.log('[GS4PM Filter] ✅ Item count stable at', currentWrappers.length, 'items, filtering now');
-        dropdownItemObserver.disconnect();
-        dropdownItemObserver = null;
-        filterDropdownWithRetry();
-      }
-    });
-    
-    // Start observing for new items
-    dropdownItemObserver.observe(listboxContainer, { childList: true, subtree: true });
-    
-    // Fallback: filter after delay even if observer doesn't trigger
-    pendingDropdownFilter = setTimeout(() => {
-      if (dropdownItemObserver) {
-        dropdownItemObserver.disconnect();
-        dropdownItemObserver = null;
-      }
-      filterDropdownWithRetry();
-    }, 1500); // Increased to 1500ms as fallback
-    
-    // Early return - don't filter yet
-    return;
-  }
 
   // Apply visibility for all NON-DROPDOWN containers
   containersToHide.forEach(container => {
@@ -4218,7 +5804,9 @@ const observer = new MutationObserver((mutations) => {
   // But if a brand filter is active, we still need to remove/reinsert brand tiles as they mount.
   const needsBrandFiltering =
     currentFilterCustomer && currentFilterCustomer !== 'ALL' && isBrandLibraryPage();
-  if (!cachedTags.length && !needsBrandFiltering) return;
+  const needsContentAssetsReflow =
+    currentFilterCustomer && currentFilterCustomer !== 'ALL' && isContentAssetsPage();
+  if (!cachedTags.length && !needsBrandFiltering && !needsContentAssetsReflow) return;
   
   let hasDropdownMutation = false;
   
@@ -4227,6 +5815,9 @@ const observer = new MutationObserver((mutations) => {
       // Content/assets + templates reuse DOM nodes; re-apply badges when ids change.
       scheduleBadgeRefresh();
       scheduleBrandFilterRefresh();
+      if (isContentAssetsPage() && currentFilterCustomer && currentFilterCustomer !== 'ALL') {
+        scheduleContentAssetsGridReflow();
+      }
       return;
     }
     m.addedNodes.forEach(node => {
@@ -4266,6 +5857,14 @@ const observer = new MutationObserver((mutations) => {
       
       // For non-dropdown nodes, filter immediately
       applyFilterToNode(node);
+      // Content/assets: virtualized mosaic tiles lose left/top after display toggles; reflow when filter is on.
+      if (
+        isContentAssetsPage() &&
+        currentFilterCustomer &&
+        currentFilterCustomer !== 'ALL'
+      ) {
+        scheduleContentAssetsGridReflow();
+      }
       // Brands grid virtualization: re-apply hide/show when brand tiles mount.
       if (
         node instanceof Element &&
@@ -4292,6 +5891,9 @@ window.addEventListener(
   () => {
     scheduleBadgeRefresh();
     try { scheduleBrandLibraryCardLabelRefresh(); } catch (e) {}
+    if (isContentAssetsPage() && currentFilterCustomer && currentFilterCustomer !== 'ALL') {
+      scheduleContentAssetsGridReflow();
+    }
   },
   true
 );
@@ -4498,4 +6100,5 @@ if (chrome.runtime && chrome.runtime.id) {
 } else {
   console.log('[GS4PM Filter] Extension context not available - page reload needed');
 }
+  });
 }

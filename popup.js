@@ -2,6 +2,7 @@ const CUSTOMER_KEY = 'gs4pm_customers';
 const CURRENT_CUSTOMER_KEY = 'gs4pm_current_customer';
 const ACTIVE_FILTER_KEY = 'gs4pm_active_filter_customer';
 const TAGGING_ENABLED_KEY = 'gs4pm_tagging_enabled';
+const PLUGIN_DISABLED_KEY = 'gs4pm_plugin_disabled';
 const OPEN_ADD_CUSTOMER_KEY = 'gs4pm_open_add_customer';
 const DEFAULT_CUSTOMERS = [];
 const GS4PM_HOST = 'experience.adobe.com';
@@ -61,6 +62,7 @@ const toggleTaggingBtn = document.getElementById('toggle-tagging');
 const newCustomerInput = document.getElementById('new-customer');
 const addCustomerBtn = document.getElementById('add-customer');
 const disabledSection = document.getElementById('disabled-section');
+const pluginDisabledSection = document.getElementById('plugin-disabled-section');
 const manageSection = document.getElementById('manage-section');
 const githubLink = document.getElementById('github-link');
 const versionText = document.getElementById('version-text');
@@ -88,11 +90,40 @@ function wireFooter() {
   }
 }
 
-function setUiDisabled(disabled) {
-  if (disabledSection) disabledSection.hidden = !disabled;
+function setControlsDisabled(disabled) {
   [filterSelect, tagSelect, toggleTaggingBtn, newCustomerInput, addCustomerBtn].forEach((el) => {
     if (!el) return;
     el.disabled = !!disabled;
+  });
+}
+
+function refreshPopupForState() {
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const activeTab = tabs && tabs.length ? tabs[0] : null;
+    const isAllowed = isGs4pmUrl(activeTab?.url || '');
+    chrome.storage.local.get([PLUGIN_DISABLED_KEY], (data) => {
+      const pluginOff = !!data[PLUGIN_DISABLED_KEY];
+
+      if (!isAllowed) {
+        if (disabledSection) disabledSection.hidden = false;
+        if (pluginDisabledSection) pluginDisabledSection.hidden = true;
+        setControlsDisabled(true);
+        return;
+      }
+
+      if (pluginOff) {
+        if (disabledSection) disabledSection.hidden = true;
+        if (pluginDisabledSection) pluginDisabledSection.hidden = false;
+        setControlsDisabled(true);
+        return;
+      }
+
+      if (disabledSection) disabledSection.hidden = true;
+      if (pluginDisabledSection) pluginDisabledSection.hidden = true;
+      setControlsDisabled(false);
+      loadStateAndCustomers();
+      checkOpenAddCustomerFlag();
+    });
   });
 }
 
@@ -327,14 +358,10 @@ toggleTaggingBtn.addEventListener('click', () => {
   }
 });
 
-// Initial load
-chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-  const activeTab = tabs && tabs.length ? tabs[0] : null;
-  const isAllowed = isGs4pmUrl(activeTab?.url || '');
-  setUiDisabled(!isAllowed);
-  wireFooter();
-
-  if (!isAllowed) return;
-  loadStateAndCustomers();
-  checkOpenAddCustomerFlag();
+// Initial load + when the toolbar menu toggles Customer Lens
+wireFooter();
+refreshPopupForState();
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes[PLUGIN_DISABLED_KEY]) return;
+  refreshPopupForState();
 });

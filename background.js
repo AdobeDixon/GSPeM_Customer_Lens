@@ -8,6 +8,8 @@ const GS4PM_HOST = 'experience.adobe.com';
 const GS4PM_TOKEN = 'genstudio';
 const TAGGING_ENABLED_KEY = 'gs4pm_tagging_enabled';
 const OVERLAY_VISIBLE_KEY = 'gs4pm_overlay_visible';
+const PLUGIN_DISABLED_KEY = 'gs4pm_plugin_disabled';
+const ACTION_MENU_PLUGIN_ID = 'gs4pm_action_toggle_plugin';
 
 function isGs4pmUrl(url) {
   if (!url) return false;
@@ -15,6 +17,16 @@ function isGs4pmUrl(url) {
     const parsed = new URL(url);
     return parsed.hostname === GS4PM_HOST && url.toLowerCase().includes(GS4PM_TOKEN);
   } catch (error) {
+    return false;
+  }
+}
+
+/** Host-only check (manifest matches). Used for keyboard shortcuts so toggling still works when the visible tab URL omits `genstudio` (SPA routes, iframe-only URLs). */
+function isExperienceAdobeHost(url) {
+  if (!url) return false;
+  try {
+    return new URL(url).hostname === GS4PM_HOST;
+  } catch {
     return false;
   }
 }
@@ -77,7 +89,30 @@ function rebuildContextMenu() {
         contexts: ['all'],
         documentUrlPatterns: ['https://experience.adobe.com/*']
       });
+
+      syncActionPluginMenu();
     });
+  });
+}
+
+function syncActionPluginMenu() {
+  chrome.storage.local.get([PLUGIN_DISABLED_KEY], (data) => {
+    const disabled = !!data[PLUGIN_DISABLED_KEY];
+    const checked = !disabled;
+    chrome.contextMenus.update(
+      ACTION_MENU_PLUGIN_ID,
+      { title: 'Enable Customer Lens', checked },
+      () => {
+        if (!chrome.runtime.lastError) return;
+        chrome.contextMenus.create({
+          id: ACTION_MENU_PLUGIN_ID,
+          type: 'checkbox',
+          title: 'Enable Customer Lens',
+          contexts: ['action'],
+          checked
+        });
+      }
+    );
   });
 }
 
@@ -87,9 +122,16 @@ chrome.runtime.onStartup.addListener(() => rebuildContextMenu());
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;
   if (changes[CUSTOMER_KEY]) rebuildContextMenu();
+  if (changes[PLUGIN_DISABLED_KEY]) syncActionPluginMenu();
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === ACTION_MENU_PLUGIN_ID) {
+    const enabled = !!info.checked;
+    chrome.storage.local.set({ [PLUGIN_DISABLED_KEY]: !enabled });
+    return;
+  }
+
   if (!tab || tab.id == null) return;
   if (!isGs4pmUrl(tab.url || '')) return;
 
@@ -179,11 +221,16 @@ chrome.commands?.onCommand?.addListener((command) => {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const tab = tabs && tabs.length ? tabs[0] : null;
     if (!tab) return;
-    if (!isGs4pmUrl(tab.url || '')) return;
+    if (!isExperienceAdobeHost(tab.url || '')) return;
 
     chrome.storage.local.get([OVERLAY_VISIBLE_KEY], (data) => {
       const next = !data[OVERLAY_VISIBLE_KEY];
-      chrome.storage.local.set({ [OVERLAY_VISIBLE_KEY]: next });
+      chrome.storage.local.set({ [OVERLAY_VISIBLE_KEY]: next }, () => {
+        if (tab.id == null) return;
+        // Same path as Cmd/Ctrl+K → setWorkspaceBarVisible: storage + explicit message so the
+        // top frame updates even if chrome.storage.onChanged is delayed or missed.
+        broadcastToAllFrames(tab.id, { type: 'SET_OVERLAY_VISIBLE', visible: next });
+      });
     });
   });
 });

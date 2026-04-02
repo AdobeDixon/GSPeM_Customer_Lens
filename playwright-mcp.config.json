@@ -1,0 +1,13 @@
+{
+  "browser": {
+    "browserName": "chromium",
+    "launchOptions": {
+      "channel": "chromium",
+      "ignoreDefaultArgs": ["--disable-extensions"]
+    }
+  },
+  "capabilities": ["core", "devtools", "network"],
+  "console": {
+    "level": "debug"
+  }
+}

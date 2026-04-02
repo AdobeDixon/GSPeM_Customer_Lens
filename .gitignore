@@ -3,3 +3,9 @@ node_modules/
 dist/
 build/
 *.log
+.cursor/
+.playwright-mcp/
+.env
+.env.local
+.pw-bpp-profile/
+playwright-bpp-debug-report.json

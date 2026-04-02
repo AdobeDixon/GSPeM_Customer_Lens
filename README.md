@@ -20,6 +20,9 @@ This makes it easier to focus on one customer at a time.
 
 - **Filter content by customer**
   - Filter personas, products, assets, templates, and supported dropdown options.
+- **Create-flow dropdown filtering**
+  - Brand, Product, and Persona combobox dropdowns in the create-from-template flow are filtered to show only options tagged to the active customer.
+  - Uses identity-based matching (data-key, data-item-id, UUID) with a soft-hide CSS strategy that works with React Spectrum's virtualised lists.
 - **Tag items in the page**
   - Turn on tagging mode, click an item, and toggle whether it belongs to the selected customer.
 - **Right-click tagging**
@@ -100,10 +103,32 @@ If the extension was already loaded and you made code changes:
 - **Right-click menu not appearing**
   - Right-click directly on a supported GS4PM item and ensure the extension is loaded.
 
+## Architecture: create-flow dropdown filtering
+
+The create-from-template page in GS4PM uses React Spectrum virtualised comboboxes for Brand, Product, and Persona. The extension filters these by hiding options that don't belong to the active customer.
+
+**Key challenge — virtualiser oscillation:**
+
+React's virtualiser uses the listbox element's `clientHeight` to decide how many option rows to mount. If external code changes that height, the virtualiser adds or removes DOM nodes, which can trigger a MutationObserver, which re-runs the filter, which changes height again — creating an infinite expand/shrink loop.
+
+**How the extension avoids this:**
+
+| Rule | What | Why |
+|------|------|-----|
+| A | Never set height on `[role="listbox"]` or its internal relative `[role="presentation"]` | These are virtualiser-controlled — changing them causes mount/unmount |
+| B | Set height on the **popover** ancestor only | Popover is outside the virtualiser's scope |
+| C | Pin `min-height` + `flex-shrink:0` on the listbox | The popover is a flex-column container; without this, its reduced height propagates down to the listbox via flex layout |
+| D | Guard the MutationObserver with `_gs4pmFilterRunning` | Prevents the observer from re-entering during our own DOM changes |
+| E | Don't pump the virtualiser from the observer path | Pumping scrolls/resizes containers which triggers further React reconciliation |
+
+These rules are documented in detail in `contentScript.js` above the `getDropdownChrome()` function.
+
+**If you modify dropdown sizing**, always test with the Comicon filter + Persona dropdown — it has the smallest visible/total ratio and is the most sensitive to oscillation.
+
 ## Project files (quick reference)
 
 - `manifest.json`: Chrome extension configuration
 - `background.js`: context menu and message broadcasting
-- `contentScript.js`: filtering, tagging logic, overlays, workspace bar
+- `contentScript.js`: filtering, tagging logic, overlays, workspace bar, create-flow dropdown filter
 - `popup.html` and `popup.js`: popup interface and controls
 
