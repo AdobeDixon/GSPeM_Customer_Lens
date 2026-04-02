@@ -1005,7 +1005,25 @@ function isTemplatesPage() {
 
 const ASSETS_FILTER_STYLE_ID = 'gs4pm-assets-filter-style';
 const BRAND_FILTER_STYLE_ID = 'gs4pm-brand-filter-style';
+const BRAND_PREFILTER_STYLE_ID = 'gs4pm-brand-prefilter-cloak';
 const brandRemovedNodes = new Map(); // key -> { node, parent, nextSibling }
+let brandFilterApplying = false;
+let brandFilterDelayGeneration = 0;
+let brandFilterLastApplyTime = 0;
+
+// Cloak the brand grid immediately while a filter is pending so unfiltered
+// cards don't flash before our code repositions them.
+function installBrandPrefilterCloak() {
+  if (document.getElementById(BRAND_PREFILTER_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = BRAND_PREFILTER_STYLE_ID;
+  style.textContent = '#library-grid { opacity: 0 !important; transition: opacity .15s ease; }';
+  (document.head || document.documentElement).appendChild(style);
+}
+function removeBrandPrefilterCloak() {
+  const el = document.getElementById(BRAND_PREFILTER_STYLE_ID);
+  if (el) el.remove();
+}
 
 function deepQuerySelector(selector, root = document) {
   // Searches through document + any *open* shadow roots.
@@ -1657,8 +1675,19 @@ function isBrandLibraryPage() {
   return getBrandLibraryGrid() !== null;
 }
 
-function updateBrandLibraryCssFilter(activeCustomer, tags) {
+function updateBrandLibraryCssFilter(activeCustomer, tags, _isReapply) {
+  if (brandFilterApplying) return;
   if (!isBrandLibraryPage()) return;
+  brandFilterApplying = true;
+  try {
+    _updateBrandLibraryCssFilterInner(activeCustomer, tags, _isReapply);
+  } finally {
+    brandFilterApplying = false;
+    brandFilterLastApplyTime = Date.now();
+  }
+}
+
+function _updateBrandLibraryCssFilterInner(activeCustomer, tags, _isReapply) {
 
   let styleEl = document.getElementById(BRAND_FILTER_STYLE_ID);
   const debug = Boolean(window.__GS4PM_DEBUG_BRAND_FILTER);
@@ -1681,98 +1710,120 @@ function updateBrandLibraryCssFilter(activeCustomer, tags) {
   // Remove style when showing ALL
   if (!activeCustomer || activeCustomer === 'ALL') {
     if (styleEl) styleEl.remove();
-    // Restore any removed brand cards.
+    ++brandFilterDelayGeneration;
     restoreRemovedBrandNodes();
-    // Also clear any inline hides.
     const grid = getBrandLibraryGrid();
     if (grid) {
-      // Restore grid height even if card containers have not mounted yet.
-      if (grid.dataset.gs4pmOrigHeight !== undefined) {
-        grid.style.height = grid.dataset.gs4pmOrigHeight;
-        delete grid.dataset.gs4pmOrigHeight;
-      }
+      grid.style.removeProperty('height');
+      grid.style.removeProperty('max-height');
+      grid.style.removeProperty('min-height');
+      delete grid.dataset.gs4pmOrigHeight;
       const containers = Array.from(grid.querySelectorAll('div.library-list-item-container[data-key]'));
       containers.forEach(c => {
         if (!(c instanceof Element)) return;
         c.style.removeProperty('display');
       });
-      // Restore original virtualized positions (prevents gaps after filtering).
       try { restoreVirtualizedGrid(containers); } catch (e) {}
     }
+    removeBrandPrefilterCloak();
     return;
   }
 
-  // Brands filtering semantics: when a customer is selected, SHOW ONLY brands tagged to that customer.
-  // (This makes filtering obvious and avoids "no visible change" when most brands are untagged.)
-  const showKeys = new Set();
+  // Brands filtering semantics: when a customer is selected, SHOW ONLY brands
+  // tagged to that customer. Brand library grid data-key values are ephemeral
+  // (regenerated each render), so we match by brand name (aria-label) instead.
+  const showBrandNames = new Set();
 
   (tags || []).forEach(tag => {
     if (!tag?.selector || !tag.customer) return;
     if (tag.customer !== activeCustomer) return;
-    let key = extractAttrFromSelector(tag.selector, 'data-key');
-    if (key) {
-      showKeys.add(key);
+
+    // New format: [data-gs4pm-brand-name="Brand Name"]
+    const brandName = extractAttrFromSelector(tag.selector, 'data-gs4pm-brand-name');
+    if (brandName) {
+      showBrandNames.add(brandName.toLowerCase());
       return;
     }
-    // Fallback: resolve selector in DOM and read closest brand container key.
-    try {
-      const matches = Array.from(document.querySelectorAll(tag.selector));
-      matches.forEach(el => {
-        if (!(el instanceof Element)) return;
-        const container = el.closest('div.library-list-item-container[data-key]');
-        const resolvedKey = container?.getAttribute('data-key');
-        if (resolvedKey) showKeys.add(resolvedKey);
-      });
-    } catch (e) {
-      // ignore invalid selectors
-    }
+    // Legacy: ignore non-brand selectors (persona/content/template selectors
+    // use data-omega-attribute-* or data-item-id and don't apply to brand cards).
   });
 
-  // IMPORTANT:
-  // Brand library mosaic is virtualized + absolutely positioned. Hiding/removing nodes can leave
-  // layout gaps (cards keep old left/top). Instead, we reflow visible cards to the top-left using
-  // `reorderVirtualizedGrid` and push hidden cards off-screen.
+  // If no brand-specific tags match this customer, leave cards unfiltered.
+  // This also protects against filtering before tags have loaded.
+  if (showBrandNames.size === 0) {
+    if (styleEl) styleEl.remove();
+    restoreRemovedBrandNodes();
+    const grid = getBrandLibraryGrid();
+    if (grid) {
+      const containers = Array.from(grid.querySelectorAll('div.library-list-item-container[data-key]'));
+      containers.forEach(c => {
+        if (!(c instanceof Element)) return;
+        if (c.dataset.gs4pmOrigLeft !== undefined) {
+          c.style.left = c.dataset.gs4pmOrigLeft;
+          c.style.top = c.dataset.gs4pmOrigTop;
+          c.style.display = '';
+          delete c.dataset.gs4pmOrigLeft;
+          delete c.dataset.gs4pmOrigTop;
+          delete c.dataset.gs4pmHidden;
+        }
+      });
+      const p = containers[0]?.parentElement || null;
+      if (p) { p.style.removeProperty('height'); p.style.removeProperty('max-height'); p.style.removeProperty('min-height'); delete p.dataset.gs4pmOrigHeight; }
+    }
+    removeBrandPrefilterCloak();
+    return;
+  }
+
   if (styleEl) {
-    // Remove any legacy CSS hide/show rules that can interfere with measuring positions.
     styleEl.remove();
     styleEl = null;
   }
 
-  // If we previously removed nodes with older logic, restore them so we can reposition.
   const grid = getBrandLibraryGrid();
   if (grid) {
     if (debug) {
       console.log(
         '[GS4PM Filter][Brand] applying',
         activeCustomer,
-        'tags:',
-        Array.isArray(tags) ? tags.length : 0,
-        'current removed:',
-        brandRemovedNodes.size
+        'showBrandNames:', Array.from(showBrandNames),
+        'tags:', Array.isArray(tags) ? tags.length : 0,
+        'current removed:', brandRemovedNodes.size
       );
     }
-    // Restore any previously removed nodes so we can re-evaluate for the new active customer.
     restoreRemovedBrandNodes();
 
     const containers = Array.from(
       grid.querySelectorAll('div.library-list-item-container[data-key]')
     );
 
+    // Restore any previous filter state before re-classifying.
+    containers.forEach(c => {
+      if (!(c instanceof Element)) return;
+      if (c.dataset.gs4pmOrigLeft !== undefined) {
+        c.style.left = c.dataset.gs4pmOrigLeft;
+        c.style.top = c.dataset.gs4pmOrigTop;
+        c.style.display = '';
+        delete c.dataset.gs4pmOrigLeft;
+        delete c.dataset.gs4pmOrigTop;
+        delete c.dataset.gs4pmHidden;
+      }
+    });
+    const parent = containers[0]?.parentElement || null;
+    if (parent) { parent.style.removeProperty('height'); parent.style.removeProperty('max-height'); parent.style.removeProperty('min-height'); delete parent.dataset.gs4pmOrigHeight; }
+
     const visible = [];
     const hidden = [];
     containers.forEach((container) => {
       if (!(container instanceof Element)) return;
-      // Clear any legacy inline display hides so we can measure/reposition.
       try { container.style.removeProperty('display'); } catch (e) {}
 
-      const key = container.getAttribute('data-key');
-      if (key && showKeys.has(key)) visible.push(container);
+      const card = deepQuerySelector('[data-test-id^="library-grid-mosaic-card-"]', container);
+      const label = card ? getBrandLibraryCardLabel(card).toLowerCase() : '';
+      if (label && showBrandNames.has(label)) visible.push(container);
       else hidden.push(container);
     });
 
     if (visible.length === 0) {
-      // Hide all (no matches) without leaving gaps.
-      const parent = containers[0]?.parentElement || null;
       hidden.forEach((container) => {
         if (!(container instanceof Element)) return;
         if (!container.dataset.gs4pmOrigLeft) {
@@ -1783,10 +1834,6 @@ function updateBrandLibraryCssFilter(activeCustomer, tags) {
         container.style.top = '-9999px';
         container.dataset.gs4pmHidden = 'true';
       });
-      if (parent) {
-        if (!parent.dataset.gs4pmOrigHeight) parent.dataset.gs4pmOrigHeight = parent.style.height;
-        parent.style.height = '0px';
-      }
       if (debug) console.log('[GS4PM Filter][Brand] no matches; hid all brand tiles');
     } else {
       try { reorderVirtualizedGrid(visible, hidden); } catch (e) {}
@@ -1796,15 +1843,30 @@ function updateBrandLibraryCssFilter(activeCustomer, tags) {
       console.log(
         '[GS4PM Filter][Brand] grid containers:',
         containers.length,
-        'showKeys:',
-        showKeys.size,
-        'visible:',
-        visible.length,
-        'hidden:',
-        hidden.length
+        'showBrandNames:', Array.from(showBrandNames),
+        'visible:', visible.length,
+        'hidden:', hidden.length
       );
     }
+
+    removeBrandPrefilterCloak();
+
+    if (!_isReapply) {
+      scheduleBrandFilterReapply(activeCustomer, tags);
+    }
   }
+}
+
+function scheduleBrandFilterReapply(activeCustomer, tags) {
+  const gen = ++brandFilterDelayGeneration;
+  const delays = [150, 400, 800, 1500];
+  delays.forEach(ms => {
+    setTimeout(() => {
+      if (brandFilterDelayGeneration !== gen) return;
+      if (currentFilterCustomer !== activeCustomer) return;
+      try { updateBrandLibraryCssFilter(activeCustomer, tags, true); } catch (e) {}
+    }, ms);
+  });
 }
 
 // ===== Selector helpers =====
@@ -1820,6 +1882,24 @@ function getUniqueSelector(el) {
     const itemId = contentAncestor.getAttribute('data-item-id');
     if (itemId) {
       return `[data-item-id="${cssEscapeAttrValue(itemId)}"]`;
+    }
+  }
+
+  // Brand library cards: data-key is ephemeral (regenerated each render), so use
+  // the card's aria-label (brand name) which is stable across sessions.
+  if (isBrandLibraryPage()) {
+    const brandCard = el.closest && (
+      el.closest('[data-test-id^="library-grid-mosaic-card-"]') ||
+      el.closest('div.library-list-item-container[data-key]')
+    );
+    if (brandCard) {
+      const card = brandCard.matches('[data-test-id^="library-grid-mosaic-card-"]')
+        ? brandCard
+        : deepQuerySelector('[data-test-id^="library-grid-mosaic-card-"]', brandCard);
+      const label = card && (card.getAttribute('aria-label') || '').trim();
+      if (label) {
+        return `[data-gs4pm-brand-name="${cssEscapeAttrValue(label)}"]`;
+      }
     }
   }
 
@@ -2346,9 +2426,10 @@ function reorderVirtualizedGrid(visibleContainers, hiddenContainers) {
   function metricsFor(c) {
     const left = parseFloat(c.dataset.gs4pmOrigLeft || c.style.left) || 0;
     const top = parseFloat(c.dataset.gs4pmOrigTop || c.style.top) || 0;
-    const cs = window.getComputedStyle(c);
-    const width = parseFloat(cs.width) || 0;
-    const height = parseFloat(cs.height) || 0;
+    // Use offsetHeight (actual rendered size) rather than getComputedStyle
+    // which can return the CSS height before content (images) fully loads.
+    const width = c.offsetWidth || parseFloat(window.getComputedStyle(c).width) || 0;
+    const height = c.offsetHeight || parseFloat(window.getComputedStyle(c).height) || 0;
     return { left, top, width, height };
   }
 
@@ -2377,15 +2458,19 @@ function reorderVirtualizedGrid(visibleContainers, hiddenContainers) {
     ? Math.min(...firstRowItems.slice(1).map((p, i) => p.left - firstRowItems[i].left))
     : positions[0].width + 24;
   
-  // Row step: minimum vertical delta between rows (ignore horizontal neighbors on the same row).
-  let rowHeight = positions[0].height + 24;
+  // Row height: use the tallest card's actual height + gap. The vertical delta
+  // between container tops can be unreliable during React's initial render
+  // (before images load, containers may be stacked at tiny offsets like 26px).
+  const maxCardHeight = Math.max(...positions.map(p => p.height));
+  let rowHeight = maxCardHeight + 24;
   if (positions.length > 1) {
     let minRowStep = Infinity;
     for (let i = 1; i < positions.length; i++) {
       const dy = positions[i].top - positions[i - 1].top;
       if (dy > 10) minRowStep = Math.min(minRowStep, dy);
     }
-    if (minRowStep < Infinity) rowHeight = minRowStep;
+    // Only use the row step if it's at least as tall as the cards.
+    if (minRowStep < Infinity && minRowStep >= maxCardHeight) rowHeight = minRowStep;
   }
   
   // Detect columns per row
@@ -2424,26 +2509,20 @@ function reorderVirtualizedGrid(visibleContainers, hiddenContainers) {
     container.dataset.gs4pmHidden = 'true';
   });
   
-  // Adjust parent height to fit visible cards
+  // Force grid height to fit visible cards. React's virtualizer recalculates
+  // height based on all containers (including off-screen ones), producing a tiny
+  // value. Override with !important so visible cards are not clipped.
   const visibleRows = Math.ceil(safeVisible.length / columnsPerRow);
-  const newHeight = visibleRows * rowHeight;
-  if (!parent.dataset.gs4pmOrigHeight) {
-    parent.dataset.gs4pmOrigHeight = parent.style.height;
-  }
-  parent.style.height = newHeight + 'px';
-  
-  console.log('[GS4PM Filter] Grid reordered:', safeVisible.length, 'cards in', visibleRows, 'rows, height=' + newHeight + 'px');
+  const neededHeight = originTop + visibleRows * rowHeight;
+  parent.style.setProperty('height', neededHeight + 'px', 'important');
+
+  console.log('[GS4PM Filter] Grid reordered:', safeVisible.length, 'visible,', safeHidden.length, 'hidden, height=' + neededHeight + 'px');
 }
 
 function restoreVirtualizedGrid(containers) {
   const grid = getBrandLibraryGrid();
   if (containers.length === 0) {
-    // Virtualized remounts can briefly leave zero card nodes; still restore the
-    // grid height if we previously collapsed it.
-    if (grid && grid.dataset.gs4pmOrigHeight !== undefined) {
-      grid.style.height = grid.dataset.gs4pmOrigHeight;
-      delete grid.dataset.gs4pmOrigHeight;
-    }
+    if (grid) { grid.style.removeProperty('height'); delete grid.dataset.gs4pmOrigHeight; }
     return;
   }
   
@@ -2460,8 +2539,10 @@ function restoreVirtualizedGrid(containers) {
     }
   });
   
-  if (parent && parent.dataset.gs4pmOrigHeight !== undefined) {
-    parent.style.height = parent.dataset.gs4pmOrigHeight;
+  if (parent) {
+    parent.style.removeProperty('height');
+    parent.style.removeProperty('max-height');
+    parent.style.removeProperty('min-height');
     delete parent.dataset.gs4pmOrigHeight;
   }
   
@@ -4753,7 +4834,7 @@ function applyFilterToNode(node) {
     return;
   }
 
-  if (isContentAssetsPage() || isTemplatesPage()) return;
+  if (isContentAssetsPage() || isTemplatesPage() || isBrandLibraryPage()) return;
 
   // NEW LOGIC: Hide only items tagged to OTHER customers
   // Show items tagged to current customer + all untagged items
@@ -5039,12 +5120,13 @@ function getBrandLibraryCardLabel(cardEl) {
   return 'Brand';
 }
 
-function buildCustomerSetByBrandKey(tags) {
-  const map = new Map(); // key -> Set(customers)
+function buildCustomerSetByBrandName(tags) {
+  const map = new Map(); // brandName (lowercase) -> Set(customers)
   (tags || []).forEach((t) => {
     const customer = t?.customer;
-    const key = extractAttrFromSelector(t?.selector, 'data-key');
-    if (!customer || !key) return;
+    const brandName = extractAttrFromSelector(t?.selector, 'data-gs4pm-brand-name');
+    if (!customer || !brandName) return;
+    const key = brandName.toLowerCase();
     let set = map.get(key);
     if (!set) {
       set = new Set();
@@ -5118,7 +5200,7 @@ function applyBrandLibraryCardLabels(root = document) {
   let scope = grid;
   if (root instanceof Element && grid.contains(root)) scope = root;
 
-  const tagMap = buildCustomerSetByBrandKey(cachedTags);
+  const tagMap = buildCustomerSetByBrandName(cachedTags);
 
   const candidates = [];
   if (scope instanceof Element && scope.matches(BRAND_CARD_SELECTOR)) candidates.push(scope);
@@ -5132,8 +5214,8 @@ function applyBrandLibraryCardLabels(root = document) {
     if (!testId || !testId.startsWith('library-grid-mosaic-card-')) return;
     currentCards.add(el);
 
-    const key = getBrandKeyFromCard(el);
-    const customers = key ? Array.from(tagMap.get(key) || []) : [];
+    const brandLabel = getBrandLibraryCardLabel(el).toLowerCase();
+    const customers = brandLabel ? Array.from(tagMap.get(brandLabel) || []) : [];
 
     // Only show a label when the brand is tagged (this matches “see what it’s tagged as”).
     if (!customers.length) {
@@ -5788,13 +5870,17 @@ function scheduleBadgeRefresh() {
 
 function scheduleBrandFilterRefresh() {
   if (brandFilterRefreshScheduled) return;
+  if (brandFilterApplying) return;
+  if (!cachedTags.length) return;
   if (!isBrandLibraryPage()) return;
   if (!currentFilterCustomer || currentFilterCustomer === 'ALL') return;
+  // Suppress observer-triggered re-applies for 2s after our own filter ran.
+  if (Date.now() - brandFilterLastApplyTime < 2000) return;
   brandFilterRefreshScheduled = true;
   requestAnimationFrame(() => {
     brandFilterRefreshScheduled = false;
-    // Re-apply brand filtering to handle virtualization re-mounts.
-    updateBrandLibraryCssFilter(currentFilterCustomer, cachedTags);
+    if (Date.now() - brandFilterLastApplyTime < 2000) return;
+    updateBrandLibraryCssFilter(currentFilterCustomer, cachedTags, true);
     try { scheduleBrandLibraryCardLabelRefresh(); } catch (e) {}
   });
 }
@@ -5903,6 +5989,7 @@ function handleRouteChange() {
   console.log('[GS4PM Filter] Route changed to', location.pathname, 're-applying filter:', currentFilterCustomer);
   // Ensure brand labels don’t persist across routes.
   try { clearBrandLibraryCardLabels({ removeLayer: false }); } catch (e) {}
+  if (currentFilterCustomer && currentFilterCustomer !== 'ALL') installBrandPrefilterCloak();
   cachedTags = [];
   applyFilter(currentFilterCustomer || 'ALL');
   try { initBrandLibraryCardLabels(); } catch (e) {}
@@ -6089,11 +6176,13 @@ if (chrome.runtime && chrome.runtime.id) {
       console.log('[GS4PM Filter] Could not load saved filter, using default');
       currentFilterCustomer = 'ALL';
       applyFilter('ALL');
+      removeBrandPrefilterCloak();
       return;
     }
     const saved = data[ACTIVE_FILTER_KEY];
     const initial = !saved ? 'ALL' : saved;
     console.log('[GS4PM Filter] Initial active filter for this page:', initial);
+    if (initial && initial !== 'ALL') installBrandPrefilterCloak();
     currentFilterCustomer = initial;
     applyFilter(initial);
   });

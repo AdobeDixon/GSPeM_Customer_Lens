@@ -1,0 +1,58 @@
+- generic [ref=e1]:
+  - generic [ref=e5]:
+    - banner [ref=e7]:
+      - generic [ref=e8]:
+        - generic [ref=e9]:
+          - button [ref=e78]:
+            - generic [ref=e12]: Skip to main content
+          - button [pressed] [ref=e79]:
+            - img [ref=e15]
+          - button [ref=e80]:
+            - img
+            - generic [ref=e18]: Adobe GenStudio
+        - generic [ref=e19]:
+          - button [ref=e81]:
+            - generic [ref=e21]: Demo EMEA
+          - separator [ref=e22]
+          - button [ref=e82]:
+            - img [ref=e25]
+          - button [ref=e83]:
+            - generic [ref=e31]
+          - button [ref=e84]:
+            - img [ref=e38]
+          - button [ref=e85]:
+            - figure [ref=e49]
+    - iframe [active] [ref=e54]:
+      - generic [ref=f22e1]:
+        - generic [ref=f22e2]:
+          - log
+          - log
+        - main [ref=f22e7]:
+          - generic [ref=f22e10]:
+            - generic [ref=f22e12]
+            - generic [ref=f22e31]
+            - generic [ref=f22e52]
+        - generic:
+          - generic:
+            - listbox "Suggestions Brand" [ref=f22e182]
+            - button "Dismiss" [ref=f22e188]
+  - generic [ref=e56]:
+    - generic [ref=e57]:
+      - generic [ref=e58]:
+        - generic [ref=e59]: Filter
+        - button "Filter customer" [ref=e61] [cursor=pointer]:
+          - generic [ref=e62]: Comicon
+          - generic [ref=e63]: ▴
+      - generic [ref=e64]:
+        - generic [ref=e65]: Tag
+        - button "Tag customer" [ref=e67] [cursor=pointer]:
+          - generic [ref=e68]: Art of Food
+          - generic [ref=e69]: ▴
+    - generic [ref=e71]:
+      - generic [ref=e72]: Add
+      - textbox "New customer name" [ref=e73]:
+        - /placeholder: New customer
+      - button "Add" [ref=e74] [cursor=pointer]
+    - generic [ref=e75]:
+      - button "Enable tagging" [ref=e76] [cursor=pointer]
+      - button "Hide" [ref=e77] [cursor=pointer]

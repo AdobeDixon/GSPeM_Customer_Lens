@@ -1,0 +1,138 @@
+- generic [ref=e1]:
+  - generic [ref=e5]:
+    - banner [ref=e7]:
+      - generic [ref=e8]
+    - iframe [active] [ref=e54]:
+      - generic [ref=f19e1]:
+        - generic [ref=f19e2]:
+          - log
+          - log
+        - main [ref=f19e7]:
+          - generic [ref=f19e10]:
+            - generic [ref=f19e12]:
+              - generic [ref=f19e13]:
+                - button "Go Back" [ref=f19e14]:
+                  - img [ref=f19e16]
+                - separator [ref=f19e18]
+              - group [ref=f19e20]:
+                - button "Editable content (click to edit)." [ref=f19e21]:
+                  - 'heading "Meta: Untitled Draft - 04/02/26, 02:42 PM (editable)" [level=1] [ref=f19e22]': "Meta: Untitled Draft - 04/02/26, 02:42 PM"
+              - generic [ref=f19e23]:
+                - button "Publish" [disabled] [ref=f19e24]:
+                  - generic [ref=f19e25]: Publish
+                - button "Export" [disabled] [ref=f19e26]:
+                  - generic [ref=f19e27]: Export
+                - button "Request approval" [disabled] [ref=f19e28]
+            - generic [ref=f19e31]:
+              - button [ref=f19e32]:
+                - img [ref=f19e35]
+              - button "Resize button left canvas" [disabled] [ref=f19e39]:
+                - img [ref=f19e41]
+            - generic [ref=f19e52]:
+              - article [ref=f19e54]:
+                - generic [ref=f19e56]:
+                  - generic:
+                    - generic:
+                      - generic:
+                        - generic:
+                          - generic:
+                            - generic:
+                              - generic:
+                                - img
+                                - generic:
+                                  - generic: Your Brand
+                                  - generic: Sponsored
+                              - generic: Body
+                          - generic:
+                            - generic:
+                              - img "Toronto Comicon Background"
+                              - generic:
+                                - generic: On Image text
+                              - img "Toronto Comicon Logo"
+                          - generic:
+                            - generic:
+                              - generic:
+                                - generic: example.com
+                                - generic: Headline
+                              - button "CTA"
+              - generic [ref=f19e57]:
+                - generic [ref=f19e58]:
+                  - generic [ref=f19e59]:
+                    - heading "Create your ads" [level=3] [ref=f19e60]
+                    - button "Hide prompt" [ref=f19e61]:
+                      - img [ref=f19e63]
+                  - generic [ref=f19e65]:
+                    - generic [ref=f19e66]:
+                      - heading "Parameters" [level=3] [ref=f19e68]:
+                        - button "Parameters" [expanded] [ref=f19e69]:
+                          - img [ref=f19e71]
+                          - generic [ref=f19e73]: Parameters
+                      - group "Parameters" [ref=f19e74]:
+                        - generic [ref=f19e76]:
+                          - generic [ref=f19e77]:
+                            - generic [ref=f19e79]: Brand
+                            - generic [ref=f19e80]:
+                              - combobox "Brand" [ref=f19e83]
+                              - button "Show suggestions Brand" [ref=f19e84]:
+                                - img
+                          - generic [ref=f19e85]:
+                            - generic [ref=f19e87]: Product
+                            - generic [ref=f19e88]:
+                              - combobox "Product" [ref=f19e91]
+                              - button "Show suggestions Product" [ref=f19e92]:
+                                - img
+                          - generic [ref=f19e93]:
+                            - generic [ref=f19e95]: Persona
+                            - generic [ref=f19e96]:
+                              - combobox "Persona" [active] [ref=f19e99]
+                              - button "Show suggestions Persona" [ref=f19e100]:
+                                - img
+                          - generic [ref=f19e101]:
+                            - generic [ref=f19e103]: Language
+                            - generic [ref=f19e104]:
+                              - combobox "Language" [ref=f19e107]: English (US)
+                              - button "Show suggestions Language" [ref=f19e108]:
+                                - img
+                    - generic [ref=f19e110]:
+                      - generic [ref=f19e111]:
+                        - heading "Media" [level=3] [ref=f19e112]
+                        - button [ref=f19e113]:
+                          - img [ref=f19e115]
+                      - generic [ref=f19e121]:
+                        - button "DropZone" [ref=f19e123]
+                        - generic [ref=f19e124]:
+                          - button "Select from content" [ref=f19e126]
+                          - text: Drop your JPEG, PNG, or GIF here.
+                    - generic [ref=f19e127]:
+                      - heading "Prompt" [level=3] [ref=f19e128]
+                      - generic [ref=f19e129]:
+                        - textbox "Describe the experiences you'd like to generate." [ref=f19e131]: Create a Meta ad with a catchy headline, benefit-focused copy, clear CTA, and amplify reasons to engage.
+                        - generic [ref=f19e132]:
+                          - button "Create ads to engage target customers" [ref=f19e133] [cursor=pointer]:
+                            - generic [ref=f19e134]: Create ads to engage target customers
+                          - button "Create ads to release a new product" [ref=f19e135] [cursor=pointer]:
+                            - generic [ref=f19e136]: Create ads to release a new product
+                          - button "Create ads to announce a promotion" [ref=f19e137] [cursor=pointer]:
+                            - generic [ref=f19e138]: Create ads to announce a promotion
+                - generic [ref=f19e139]:
+                  - separator [ref=f19e140]
+                  - generic [ref=f19e141]:
+                    - button "Generate" [ref=f19e142]:
+                      - img [ref=f19e145]
+                      - generic [ref=f19e148]: Generate
+                    - generic [ref=f19e149]:
+                      - text: Verify responses.
+                      - link "Generative AI User Guidelines" [ref=f19e150] [cursor=pointer]:
+                        - /url: https://www.adobe.com/legal/licenses-terms/adobe-dx-gen-ai-user-guidelines.html
+  - generic [ref=e56]:
+    - generic [ref=e57]:
+      - generic [ref=e58]
+      - generic [ref=e64]
+    - generic [ref=e71]:
+      - generic [ref=e72]: Add
+      - textbox "New customer name" [ref=e73]:
+        - /placeholder: New customer
+      - button "Add" [ref=e74] [cursor=pointer]
+    - generic [ref=e75]:
+      - button "Enable tagging" [ref=e76] [cursor=pointer]
+      - button "Hide" [ref=e77] [cursor=pointer]

@@ -1,0 +1,75 @@
+- generic [ref=e1]:
+  - generic [ref=e5]:
+    - banner [ref=e7]:
+      - generic [ref=e8]:
+        - generic [ref=e9]:
+          - button "Skip to main content" [ref=e78]:
+            - generic [ref=e12]: Skip to main content
+          - button "Toggle side navigation menu" [pressed] [ref=e79]:
+            - img [ref=e15]
+          - button "Adobe GenStudio" [ref=e80]:
+            - img
+            - generic [ref=e18]: Adobe GenStudio
+        - generic [ref=e19]:
+          - 'button "Select another org account. Selected org: Demo EMEA" [ref=e81]':
+            - generic [ref=e21]: Demo EMEA
+          - separator [ref=e22]
+          - button "Help" [ref=e82]:
+            - img [ref=e25]
+          - 'button "Notifications and Announcements. unread notifications : 6 . Has new announcement" [ref=e83]':
+            - generic [ref=e31]:
+              - generic [ref=e32]: "6"
+              - img [ref=e34]
+          - button "Switch to another Solution" [ref=e84]:
+            - img [ref=e38]
+          - button "Profile" [ref=e85]:
+            - figure [ref=e49]:
+              - img "User Profile" [ref=e86]
+    - iframe [active] [ref=e54]:
+      - generic [ref=f25e1]:
+        - generic [ref=f25e2]:
+          - log
+          - log
+        - main [ref=f25e7]:
+          - generic [ref=f25e10]:
+            - generic [ref=f25e12]:
+              - generic [ref=f25e13]:
+                - button "Go Back" [ref=f25e14]
+                - separator [ref=f25e18]
+              - group [ref=f25e20]:
+                - button "Editable content (click to edit)." [ref=f25e21]
+              - generic [ref=f25e23]:
+                - button "Publish" [disabled] [ref=f25e24]
+                - button "Export" [disabled] [ref=f25e26]
+                - button "Request approval" [disabled] [ref=f25e28]
+            - generic [ref=f25e31]:
+              - button [ref=f25e32]:
+                - img [ref=f25e35]
+              - button "Resize button left canvas" [disabled] [ref=f25e39]:
+                - img [ref=f25e41]
+            - generic [ref=f25e52]:
+              - article [ref=f25e54]:
+                - generic [ref=f25e56]
+              - generic [ref=f25e57]:
+                - generic [ref=f25e58]
+                - generic [ref=f25e139]
+  - generic [ref=e56]:
+    - generic [ref=e57]:
+      - generic [ref=e58]:
+        - generic [ref=e59]: Filter
+        - button "Filter customer" [ref=e61] [cursor=pointer]:
+          - generic [ref=e62]: Comicon
+          - generic [ref=e63]: ▴
+      - generic [ref=e64]:
+        - generic [ref=e65]: Tag
+        - button "Tag customer" [ref=e67] [cursor=pointer]:
+          - generic [ref=e68]: Art of Food
+          - generic [ref=e69]: ▴
+    - generic [ref=e71]:
+      - generic [ref=e72]: Add
+      - textbox "New customer name" [ref=e73]:
+        - /placeholder: New customer
+      - button "Add" [ref=e74] [cursor=pointer]
+    - generic [ref=e75]:
+      - button "Enable tagging" [ref=e76] [cursor=pointer]
+      - button "Hide" [ref=e77] [cursor=pointer]
