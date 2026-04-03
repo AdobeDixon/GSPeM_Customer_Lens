@@ -1005,24 +1005,39 @@ function isTemplatesPage() {
 
 const ASSETS_FILTER_STYLE_ID = 'gs4pm-assets-filter-style';
 const BRAND_FILTER_STYLE_ID = 'gs4pm-brand-filter-style';
-const BRAND_PREFILTER_STYLE_ID = 'gs4pm-brand-prefilter-cloak';
+const BRAND_CLOAK_STYLE_ID = 'gs4pm-brand-host-cloak';
+const BRAND_FILTERED_CLASS = 'gs4pm-filtered';
 const brandRemovedNodes = new Map(); // key -> { node, parent, nextSibling }
 let brandFilterApplying = false;
 let brandFilterDelayGeneration = 0;
 let brandFilterLastApplyTime = 0;
 
-// Cloak the brand grid immediately while a filter is pending so unfiltered
-// cards don't flash before our code repositions them.
+// Persistent cloak: a document-level CSS rule hides <brand-management-app>
+// unless it carries .gs4pm-filtered.  Because the rule lives in the light DOM
+// it applies the instant React creates a new host element — even before any
+// shadow children exist — eliminating the frame-level race entirely.
 function installBrandPrefilterCloak() {
-  if (document.getElementById(BRAND_PREFILTER_STYLE_ID)) return;
-  const style = document.createElement('style');
-  style.id = BRAND_PREFILTER_STYLE_ID;
-  style.textContent = '#library-grid { opacity: 0 !important; transition: opacity .15s ease; }';
-  (document.head || document.documentElement).appendChild(style);
+  if (!document.getElementById(BRAND_CLOAK_STYLE_ID)) {
+    const s = document.createElement('style');
+    s.id = BRAND_CLOAK_STYLE_ID;
+    s.textContent = 'brand-management-app:not(.' + BRAND_FILTERED_CLASS + ') { opacity: 0 !important; }';
+    (document.head || document.documentElement).appendChild(s);
+  }
+  const bma = document.querySelector('brand-management-app');
+  if (bma) bma.classList.remove(BRAND_FILTERED_CLASS);
+  setTimeout(() => { removeBrandPrefilterCloak(); }, 5000);
 }
 function removeBrandPrefilterCloak() {
-  const el = document.getElementById(BRAND_PREFILTER_STYLE_ID);
-  if (el) el.remove();
+  if (!currentFilterCustomer || currentFilterCustomer === 'ALL') {
+    const el = document.getElementById(BRAND_CLOAK_STYLE_ID);
+    if (el) el.remove();
+  }
+  const bma = document.querySelector('brand-management-app');
+  if (bma) {
+    bma.style.setProperty('transition', 'opacity .15s ease');
+    bma.classList.add(BRAND_FILTERED_CLASS);
+    setTimeout(() => { if (bma.isConnected) bma.style.removeProperty('transition'); }, 200);
+  }
 }
 
 function deepQuerySelector(selector, root = document) {
@@ -1750,6 +1765,8 @@ function _updateBrandLibraryCssFilterInner(activeCustomer, tags, _isReapply) {
 
   // If no brand-specific tags match this customer, leave cards unfiltered.
   // This also protects against filtering before tags have loaded.
+  // Do NOT reveal the cloak here — the scheduled reapply will handle it once
+  // the data-gs4pm-brand-name attributes have been stamped on the cards.
   if (showBrandNames.size === 0) {
     if (styleEl) styleEl.remove();
     restoreRemovedBrandNodes();
@@ -1770,7 +1787,6 @@ function _updateBrandLibraryCssFilterInner(activeCustomer, tags, _isReapply) {
       const p = containers[0]?.parentElement || null;
       if (p) { p.style.removeProperty('height'); p.style.removeProperty('max-height'); p.style.removeProperty('min-height'); delete p.dataset.gs4pmOrigHeight; }
     }
-    removeBrandPrefilterCloak();
     return;
   }
 
@@ -3368,6 +3384,7 @@ function restoreVirtualizedDropdown(wrappers) {
 
 function applyFilter(activeCustomer) {
   currentFilterCustomer = activeCustomer;
+  try { sessionStorage.setItem('gs4pm-active-filter', activeCustomer); } catch (e) {}
   loadTags(tags => {
     // Clean filtering for Content/Assets: CSS-driven to avoid scroll flicker on virtualization.
     if (isContentAssetsPage()) {
@@ -6182,12 +6199,17 @@ if (chrome.runtime && chrome.runtime.id) {
     const saved = data[ACTIVE_FILTER_KEY];
     const initial = !saved ? 'ALL' : saved;
     console.log('[GS4PM Filter] Initial active filter for this page:', initial);
-    if (initial && initial !== 'ALL') installBrandPrefilterCloak();
+    if (!initial || initial === 'ALL') {
+      removeBrandPrefilterCloak();
+    } else {
+      installBrandPrefilterCloak();
+    }
     currentFilterCustomer = initial;
     applyFilter(initial);
   });
 } else {
   console.log('[GS4PM Filter] Extension context not available - page reload needed');
+  removeBrandPrefilterCloak();
 }
   });
 }

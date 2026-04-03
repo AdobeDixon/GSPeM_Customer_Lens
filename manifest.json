@@ -48,6 +48,16 @@
         "https://experience.adobe.com/*"
       ],
       "js": [
+        "brandCloak.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://experience.adobe.com/*"
+      ],
+      "js": [
         "contentScript.js"
       ],
       "run_at": "document_idle",
