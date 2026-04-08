@@ -11,6 +11,11 @@ const OVERLAY_VISIBLE_KEY = 'gs4pm_overlay_visible';
 const PLUGIN_DISABLED_KEY = 'gs4pm_plugin_disabled';
 const ACTION_MENU_PLUGIN_ID = 'gs4pm_action_toggle_plugin';
 
+// Open the side panel when the user clicks the extension icon (Chrome 114+).
+if (chrome.sidePanel?.setPanelBehavior) {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+}
+
 function isGs4pmUrl(url) {
   if (!url) return false;
   try {
@@ -137,9 +142,9 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 
   if (info.menuItemId === MENU_ADD_CUSTOMER_ID) {
     chrome.storage.local.set({ [OPEN_ADD_CUSTOMER_KEY]: true }, () => {
-      if (chrome.action && chrome.action.openPopup) {
-        chrome.action.openPopup({ windowId: tab.windowId }).catch((err) => {
-          console.warn('[GS4PM Filter] Could not open popup:', err);
+      if (chrome.sidePanel?.open && tab.windowId != null) {
+        chrome.sidePanel.open({ windowId: tab.windowId }).catch((err) => {
+          console.warn('[GS4PM Filter] Could not open side panel:', err);
         });
       }
     });

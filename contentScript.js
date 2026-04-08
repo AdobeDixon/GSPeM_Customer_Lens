@@ -325,12 +325,25 @@ function injectOverlayStyles() {
   style.id = OVERLAY_STYLE_ID;
   style.textContent = `
     :root{
-      --gs4pm-overlay-bg: linear-gradient(180deg, rgba(42, 42, 42, 0.78), rgba(20, 20, 20, 0.82));
-      --gs4pm-overlay-border: rgba(255, 255, 255, 0.10);
-      --gs4pm-overlay-text: rgba(255, 255, 255, 0.92);
-      --gs4pm-overlay-muted: rgba(255, 255, 255, 0.64);
-      --gs4pm-overlay-accent: #2ee071;
-      --gs4pm-overlay-accent-soft: rgba(46, 224, 113, 0.22);
+      --gs4pm-overlay-bg: linear-gradient(165deg, rgba(255,255,255,0.05) 0%, transparent 42%),
+        linear-gradient(180deg, rgba(12, 17, 24, 0.92), rgba(7, 10, 14, 0.94));
+      --gs4pm-overlay-border: rgba(255, 255, 255, 0.09);
+      --gs4pm-overlay-border-inner: rgba(255, 255, 255, 0.06);
+      --gs4pm-overlay-text: rgba(255, 255, 255, 0.94);
+      --gs4pm-overlay-muted: rgba(255, 255, 255, 0.68);
+      --gs4pm-overlay-accent: #14b8a6;
+      --gs4pm-overlay-accent-strong: #0d9488;
+      --gs4pm-overlay-accent-soft: rgba(20, 184, 166, 0.22);
+      --gs4pm-overlay-cta: #f97316;
+      --gs4pm-overlay-cta-soft: rgba(249, 115, 22, 0.12);
+      --gs4pm-ease: cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #${OVERLAY_ID} * {
+        transition-duration: 0.01ms !important;
+      }
+      #${OVERLAY_ID} .gs4pm-btn:active { transform: none !important; }
     }
 
     #${OVERLAY_ID}{
@@ -340,15 +353,21 @@ function injectOverlayStyles() {
       transform: translateX(-50%);
       z-index: 2147483647;
       width: min(980px, calc(100vw - 24px));
-      border-radius: 16px;
-      border: 1px solid var(--gs4pm-overlay-border);
-      background: var(--gs4pm-overlay-bg);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      box-shadow: 0 16px 36px rgba(0,0,0,0.42);
+      border-radius: 18px;
+      border: 1px solid var(--gs4pm-overlay-border-inner);
+      box-shadow:
+        0 0 0 1px rgba(0,0,0,0.35) inset,
+        0 24px 48px rgba(0,0,0,0.45);
+      background:
+        radial-gradient(120% 80% at 0% 0%, rgba(20, 184, 166, 0.10), transparent 50%),
+        radial-gradient(90% 60% at 100% 0%, rgba(99, 102, 241, 0.07), transparent 45%),
+        var(--gs4pm-overlay-bg);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
       color: var(--gs4pm-overlay-text);
-      font: 650 12px system-ui, -apple-system, Segoe UI, sans-serif;
+      font: 600 12px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       letter-spacing: 0.01em;
+      -webkit-font-smoothing: antialiased;
     }
     #${OVERLAY_ID} *{ box-sizing: border-box; }
     #${OVERLAY_ID}[data-hidden="true"]{ display:none; }
@@ -357,132 +376,191 @@ function injectOverlayStyles() {
       display:flex;
       align-items:center;
       gap:12px;
-      padding:12px 14px;
+      padding:10px 16px;
     }
-    #${OVERLAY_ID} .gs4pm-left,
-    #${OVERLAY_ID} .gs4pm-center,
-    #${OVERLAY_ID} .gs4pm-right{
+    #${OVERLAY_ID} .gs4pm-mid-controls{
       display:flex;
-      align-items:center;
+      align-items:stretch;
       gap:10px;
-      min-width:0;
-    }
-    #${OVERLAY_ID} .gs4pm-left{
-      flex:1 1 auto;
-    }
-    #${OVERLAY_ID} .gs4pm-center{
-      flex:0 0 auto;
-    }
-    #${OVERLAY_ID} .gs4pm-right{
-      flex:0 0 auto;
-      margin-left:auto;
-    }
-    #${OVERLAY_ID} .gs4pm-icon{
-      width:22px;
-      height:22px;
-      border-radius:7px;
-      border:1px solid rgba(255,255,255,0.10);
-      box-shadow: 0 10px 18px rgba(0,0,0,0.28);
-      flex:0 0 auto;
-    }
-    #${OVERLAY_ID} .gs4pm-pill{
-      display:inline-flex;
-      align-items:center;
-      gap:8px;
-      padding:6px 8px;
-      border-radius:12px;
-      border:1px solid rgba(255,255,255,0.10);
-      background: rgba(255,255,255,0.06);
       min-width:0;
       flex:0 1 auto;
     }
-    #${OVERLAY_ID} .gs4pm-pill.gs4pm-stack{
-      flex-direction:column;
-      align-items:flex-start;
-      gap:4px;
-      padding:6px 10px;
+    #${OVERLAY_ID} .gs4pm-center{
+      flex:1 1 0;
+      min-width:160px;
     }
-    #${OVERLAY_ID} .gs4pm-label{
-      color: var(--gs4pm-overlay-muted);
+    #${OVERLAY_ID} .gs4pm-right{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      flex:0 0 auto;
+      white-space:nowrap;
+    }
+
+    #${OVERLAY_ID} .gs4pm-brand-wrap{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      flex:0 0 auto;
+      padding-right:4px;
+      border-right:1px solid var(--gs4pm-overlay-border-inner);
+      margin-right:2px;
+    }
+    #${OVERLAY_ID} .gs4pm-brand-title{
+      font-size:12px;
+      font-weight:650;
+      letter-spacing:-0.02em;
+      color: var(--gs4pm-overlay-text);
+      white-space:nowrap;
+      line-height:1.2;
+    }
+    #${OVERLAY_ID} .gs4pm-brand-sub{
+      font-size:9px;
       font-weight:700;
-      font-size:10px;
       letter-spacing:0.08em;
       text-transform:uppercase;
+      color: rgba(255,255,255,0.42);
+      margin-top:1px;
+    }
+    #${OVERLAY_ID} .gs4pm-brand-text{
+      display:flex;
+      flex-direction:column;
+      min-width:0;
+    }
+
+    #${OVERLAY_ID} .gs4pm-icon{
+      width:26px;
+      height:26px;
+      border-radius:9px;
+      border:1px solid var(--gs4pm-overlay-border-inner);
+      box-shadow: 0 8px 20px rgba(0,0,0,0.35);
+      flex:0 0 auto;
+    }
+    #${OVERLAY_ID} .gs4pm-pill{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      padding:6px 10px;
+      border-radius:12px;
+      border:1px solid var(--gs4pm-overlay-border-inner);
+      background: rgba(255,255,255,0.045);
+      min-width:0;
+      flex:0 0 auto;
+      transition: border-color 200ms var(--gs4pm-ease), background 200ms var(--gs4pm-ease);
+    }
+    #${OVERLAY_ID} .gs4pm-pill:hover{
+      border-color: rgba(255,255,255,0.10);
+      background: rgba(255,255,255,0.07);
+    }
+    /* Subtle teal accent only — matches Filter card family */
+    #${OVERLAY_ID} .gs4pm-pill.gs4pm-tag-pill{
+      border-color: rgba(20, 184, 166, 0.22);
+      background: rgba(20, 184, 166, 0.07);
+    }
+    #${OVERLAY_ID} .gs4pm-pill.gs4pm-tag-pill:hover{
+      border-color: rgba(20, 184, 166, 0.32);
+      background: rgba(20, 184, 166, 0.10);
+    }
+    #${OVERLAY_ID} .gs4pm-label{
+      color: rgba(255,255,255,0.48);
+      font-weight:700;
+      font-size:10px;
+      letter-spacing:0.06em;
+      text-transform:uppercase;
       white-space:nowrap;
+      flex:0 0 auto;
     }
     #${OVERLAY_ID} .gs4pm-btn{
       border:1px solid rgba(255,255,255,0.12);
-      background: rgba(0,0,0,0.22);
+      background: rgba(255,255,255,0.06);
       color: var(--gs4pm-overlay-text);
-      border-radius:10px;
-      padding:6px 12px;
-      height:32px;
-      font-weight:700;
+      border-radius:999px;
+      padding:5px 12px;
+      height:30px;
+      font-weight:650;
+      font-size:11px;
+      letter-spacing:0.02em;
       cursor:pointer;
-      transition: background 120ms ease, border-color 120ms ease, transform 60ms ease;
+      transition: background 200ms var(--gs4pm-ease), border-color 200ms var(--gs4pm-ease), box-shadow 200ms var(--gs4pm-ease), transform 60ms ease;
       white-space:nowrap;
     }
-    #${OVERLAY_ID} .gs4pm-btn:hover{ background: rgba(255,255,255,0.08); }
+    #${OVERLAY_ID} .gs4pm-btn:hover{ background: rgba(255,255,255,0.10); border-color: rgba(255,255,255,0.16); }
+    #${OVERLAY_ID} .gs4pm-btn:focus-visible{
+      outline:none;
+      box-shadow: 0 0 0 3px var(--gs4pm-overlay-accent-soft);
+      border-color: var(--gs4pm-overlay-accent-strong);
+    }
     #${OVERLAY_ID} .gs4pm-btn:active{ transform: translateY(1px); }
 
     #${OVERLAY_ID} .gs4pm-input{
       border:1px solid rgba(255,255,255,0.12);
-      background: rgba(0,0,0,0.22);
+      background: rgba(0,0,0,0.35);
       color: var(--gs4pm-overlay-text);
       border-radius:10px;
-      padding:6px 10px;
-      height:32px;
+      padding:5px 8px;
+      height:30px;
       font-weight:600;
-      min-width:150px;
-      max-width:210px;
+      font-size:12px;
       outline:none;
+      transition: border-color 200ms var(--gs4pm-ease), box-shadow 200ms var(--gs4pm-ease);
     }
     #${OVERLAY_ID} .gs4pm-input::placeholder{
-      color: var(--gs4pm-overlay-muted);
+      color: rgba(255,255,255,0.46);
     }
     #${OVERLAY_ID} .gs4pm-input:focus{
-      border-color: var(--gs4pm-overlay-accent);
+      border-color: var(--gs4pm-overlay-accent-strong);
       box-shadow: 0 0 0 3px var(--gs4pm-overlay-accent-soft);
     }
 
     #${OVERLAY_ID} .gs4pm-btn-primary{
-      background: linear-gradient(135deg, var(--gs4pm-overlay-accent), #68ffb0);
-      border-color: rgba(255,255,255,0.10);
+      background: linear-gradient(135deg, var(--gs4pm-overlay-accent-strong), var(--gs4pm-overlay-accent));
+      border-color: rgba(255,255,255,0.12);
       color: rgba(0,0,0,0.88);
-      box-shadow: 0 10px 22px rgba(46,224,113,0.22);
+      box-shadow: 0 8px 24px rgba(20, 184, 166, 0.22);
     }
     #${OVERLAY_ID} .gs4pm-btn-primary:hover{
-      background: linear-gradient(135deg, #39ea84, #7dffbe);
+      background: linear-gradient(135deg, #0f766e, #2dd4bf);
+      box-shadow: 0 10px 28px rgba(20, 184, 166, 0.28);
     }
     #${OVERLAY_ID} .gs4pm-btn-primary[data-off="true"]{
-      background: rgba(0,0,0,0.20);
+      background: rgba(255,255,255,0.06);
       color: var(--gs4pm-overlay-text);
       box-shadow:none;
       border-color: rgba(255,255,255,0.12);
     }
+    #${OVERLAY_ID} .gs4pm-btn-primary[data-off="true"]:hover{
+      background: rgba(255,255,255,0.10);
+    }
 
     /* Custom dropdown */
-    #${OVERLAY_ID} .dd{ position:relative; min-width:160px; max-width:230px; }
+    #${OVERLAY_ID} .dd{
+      position:relative;
+      min-width:110px;
+      max-width:180px;
+      flex:1 1 auto;
+    }
 
     #${OVERLAY_ID} .dd button{
       width:100%;
       display:flex;
       align-items:center;
       justify-content:space-between;
-      gap:10px;
+      gap:6px;
       border:1px solid rgba(255,255,255,0.12);
-      background: rgba(0,0,0,0.22);
+      background: rgba(0,0,0,0.35);
       color: var(--gs4pm-overlay-text);
       border-radius:10px;
-      padding:6px 10px;
+      padding:5px 8px;
       cursor:pointer;
       font-weight:600;
-      height:32px;
+      font-size:12px;
+      height:30px;
+      transition: border-color 200ms var(--gs4pm-ease), box-shadow 200ms var(--gs4pm-ease);
     }
-    #${OVERLAY_ID} .dd button:focus{
+    #${OVERLAY_ID} .dd button:focus-visible{
       outline:none;
       box-shadow: 0 0 0 3px var(--gs4pm-overlay-accent-soft);
-      border-color: var(--gs4pm-overlay-accent);
+      border-color: var(--gs4pm-overlay-accent-strong);
     }
     #${OVERLAY_ID} .dd .value{
       overflow:hidden;
@@ -492,16 +570,30 @@ function injectOverlayStyles() {
       text-align:left;
       flex:1;
     }
-    #${OVERLAY_ID} .dd .chev{ opacity:0.75; flex:0 0 auto; }
+    #${OVERLAY_ID} .dd .chev{
+      opacity:0.8;
+      flex:0 0 auto;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      color: rgba(255,255,255,0.65);
+    }
+    #${OVERLAY_ID} .dd .chev svg{
+      transition: transform 200ms var(--gs4pm-ease);
+      transform: rotate(180deg);
+    }
+    #${OVERLAY_ID} .dd[data-open="true"] .chev svg{
+      transform: rotate(0deg);
+    }
     #${OVERLAY_ID} .dd .menu{
       position:absolute;
       left:0;
       right:0;
       bottom: calc(100% + 8px);
       border-radius:14px;
-      border:1px solid rgba(255,255,255,0.14);
-      background: rgba(18,18,18,0.96);
-      box-shadow: 0 18px 48px rgba(0,0,0,0.55);
+      border:1px solid rgba(255,255,255,0.12);
+      background: rgba(12, 14, 18, 0.97);
+      box-shadow: 0 20px 50px rgba(0,0,0,0.55);
       padding:6px;
       max-height:320px;
       overflow:auto;
@@ -509,40 +601,49 @@ function injectOverlayStyles() {
     }
     #${OVERLAY_ID} .dd[data-open="true"] .menu{ display:block; }
     #${OVERLAY_ID} .dd .opt{
-      padding:8px 10px;
+      padding:9px 11px;
       border-radius:10px;
       cursor:pointer;
-      color: rgba(255,255,255,0.88);
+      color: rgba(255,255,255,0.90);
       display:flex;
       align-items:center;
       justify-content:space-between;
       gap:10px;
+      transition: background 160ms var(--gs4pm-ease);
     }
     #${OVERLAY_ID} .dd .opt:hover{ background: rgba(255,255,255,0.08); }
     #${OVERLAY_ID} .dd .opt[data-selected="true"]{
-      background: rgba(46,224,113,0.16);
-      border: 1px solid rgba(46,224,113,0.22);
+      background: rgba(20, 184, 166, 0.14);
+      border: 1px solid rgba(20, 184, 166, 0.28);
     }
 
+    #${OVERLAY_ID} .gs4pm-add-pill{
+      flex:1 1 0;
+    }
     #${OVERLAY_ID} .gs4pm-add-pill .gs4pm-input{
-      min-width:180px;
-      max-width:240px;
+      flex:1 1 100px;
+      min-width:90px;
+      max-width:180px;
+      height:30px;
+      padding:5px 8px;
+    }
+    #${OVERLAY_ID} .gs4pm-add-pill .gs4pm-btn{
+      flex:0 0 auto;
+      width:auto;
+      min-height:30px;
+      padding:5px 12px;
     }
 
-    @media (max-width: 980px){
+    @media (max-width: 860px){
       #${OVERLAY_ID} .gs4pm-row{ flex-wrap:wrap; }
-      #${OVERLAY_ID} .gs4pm-left,
-      #${OVERLAY_ID} .gs4pm-center{
-        flex:1 1 100%;
+      #${OVERLAY_ID} .gs4pm-brand-wrap{
+        border-right:none;
+        padding-right:0;
+        margin-right:0;
       }
-      #${OVERLAY_ID} .gs4pm-right{
-        margin-left:auto;
-      }
-    }
-    @media (max-width: 640px){
-      #${OVERLAY_ID} .dd{ min-width:160px; max-width:210px; }
-      #${OVERLAY_ID} .gs4pm-input{ min-width:130px; max-width:170px; }
-      #${OVERLAY_ID} .gs4pm-add-pill .gs4pm-input{ min-width:150px; max-width:200px; }
+      #${OVERLAY_ID} .gs4pm-mid-controls{ flex:1 1 100%; }
+      #${OVERLAY_ID} .gs4pm-center{ flex:1 1 100%; }
+      #${OVERLAY_ID} .gs4pm-right{ flex:1 1 100%; justify-content:flex-end; }
     }
   `;
   (document.head || document.documentElement).appendChild(style);
@@ -567,7 +668,11 @@ function createDropdown({ label, placeholder, options, value, onChange }) {
 
   const chev = document.createElement('div');
   chev.className = 'chev';
-  chev.textContent = '▴';
+  chev.setAttribute('aria-hidden', 'true');
+  chev.innerHTML =
+    '<svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor" focusable="false">' +
+    '<path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd" />' +
+    '</svg>';
 
   btn.appendChild(valEl);
   btn.appendChild(chev);
@@ -689,9 +794,6 @@ function ensureWorkspaceBar() {
   const row = document.createElement('div');
   row.className = 'gs4pm-row';
 
-  const left = document.createElement('div');
-  left.className = 'gs4pm-left';
-
   const center = document.createElement('div');
   center.className = 'gs4pm-center';
 
@@ -705,8 +807,23 @@ function ensureWorkspaceBar() {
   icon.alt = '';
   icon.decoding = 'async';
 
+  const brandWrap = document.createElement('div');
+  brandWrap.className = 'gs4pm-brand-wrap';
+  const brandText = document.createElement('div');
+  brandText.className = 'gs4pm-brand-text';
+  const brandTitle = document.createElement('div');
+  brandTitle.className = 'gs4pm-brand-title';
+  brandTitle.textContent = 'Customer Lens';
+  const brandSub = document.createElement('div');
+  brandSub.className = 'gs4pm-brand-sub';
+  brandSub.textContent = 'GenStudio';
+  brandText.appendChild(brandTitle);
+  brandText.appendChild(brandSub);
+  brandWrap.appendChild(icon);
+  brandWrap.appendChild(brandText);
+
   const filterPill = document.createElement('div');
-  filterPill.className = 'gs4pm-pill gs4pm-stack';
+  filterPill.className = 'gs4pm-pill';
   const filterLabel = document.createElement('div');
   filterLabel.className = 'gs4pm-label';
   filterLabel.textContent = 'Filter';
@@ -727,8 +844,11 @@ function ensureWorkspaceBar() {
   filterPill.appendChild(filterLabel);
   filterPill.appendChild(filterDd.el);
 
+  const midControls = document.createElement('div');
+  midControls.className = 'gs4pm-mid-controls';
+
   const tagPill = document.createElement('div');
-  tagPill.className = 'gs4pm-pill gs4pm-stack';
+  tagPill.className = 'gs4pm-pill gs4pm-tag-pill';
   const tagLabel = document.createElement('div');
   tagLabel.className = 'gs4pm-label';
   tagLabel.textContent = 'Tag';
@@ -754,6 +874,9 @@ function ensureWorkspaceBar() {
 
   tagPill.appendChild(tagLabel);
   tagPill.appendChild(tagDd.el);
+
+  midControls.appendChild(filterPill);
+  midControls.appendChild(tagPill);
 
   const addPill = document.createElement('div');
   addPill.className = 'gs4pm-pill gs4pm-add-pill';
@@ -850,12 +973,10 @@ function ensureWorkspaceBar() {
   right.appendChild(toggleTagBtn);
   right.appendChild(hideBtn);
 
-  left.appendChild(icon);
-  left.appendChild(filterPill);
-  left.appendChild(tagPill);
   center.appendChild(addPill);
 
-  row.appendChild(left);
+  row.appendChild(brandWrap);
+  row.appendChild(midControls);
   row.appendChild(center);
   row.appendChild(right);
   bar.appendChild(row);
@@ -1865,7 +1986,12 @@ function _updateBrandLibraryCssFilterInner(activeCustomer, tags, _isReapply) {
       );
     }
 
-    removeBrandPrefilterCloak();
+    // Only drop the prefilter cloak after we've classified real tile nodes. If the grid
+    // is mounted but virtualization hasn't rendered `library-list-item-container` rows yet
+    // (containers.length === 0), removing the cloak would flash every card as it appears.
+    if (containers.length > 0) {
+      removeBrandPrefilterCloak();
+    }
 
     if (!_isReapply) {
       scheduleBrandFilterReapply(activeCustomer, tags);

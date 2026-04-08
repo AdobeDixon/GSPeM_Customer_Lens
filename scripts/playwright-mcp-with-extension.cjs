@@ -26,8 +26,9 @@ if (fs.existsSync(baseConfigPath)) {
 base.browser = base.browser || {};
 base.browser.browserName = base.browser.browserName || 'chromium';
 base.browser.launchOptions = base.browser.launchOptions || {};
-// Google Chrome no longer supports --load-extension; use Playwright's bundled Chromium.
-base.browser.launchOptions.channel = base.browser.launchOptions.channel || 'chromium';
+// Default to system Google Chrome (no extra `install-browser` download). Override in
+// playwright-mcp.config.json with `"channel": "chromium"` if you use Playwright's bundled Chromium.
+base.browser.launchOptions.channel = base.browser.launchOptions.channel || 'chrome';
 
 const prevArgs = base.browser.launchOptions.args || [];
 const extArgs = [

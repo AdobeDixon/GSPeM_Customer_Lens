@@ -9,13 +9,16 @@
     "scripting",
     "activeTab",
     "contextMenus",
-    "webNavigation"
+    "webNavigation",
+    "sidePanel"
   ],
   "host_permissions": [
     "https://experience.adobe.com/*"
   ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
   "action": {
-    "default_popup": "popup.html",
     "default_title": "Customer Lens",
     "default_icon": {
       "16": "icons/logo.png",
